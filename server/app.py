@@ -1,4 +1,4 @@
-import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, base64, io
+import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, base64, io, shutil
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -12,7 +12,7 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.4.4',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.4.5',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -57,28 +57,108 @@ def unique_file(directory,name):
     while target.exists():target=directory/f'{stem} ({i}){ext}';i+=1
     return target
 
+def backup_index():
+    """One-time pre-repair SQLite snapshot, created with SQLite backup API."""
+    backup=DATA/'app.sqlite3.before-media-repair-v045.bak'
+    if backup.exists():return
+    source=sqlite3.connect(DATA/'app.sqlite3')
+    try:
+        with sqlite3.connect(backup) as target:source.backup(target)
+    finally:source.close()
+
+
+def replace_media_refs(c,old_id,new_id):
+    for row in c.execute('SELECT id,items FROM playlists').fetchall():
+        items=json.loads(row['items'])
+        updated=[new_id if x==old_id else x for x in items]
+        if updated!=items:c.execute('UPDATE playlists SET items=? WHERE id=?',(json.dumps(updated),row['id']))
+    for row in c.execute('SELECT id,manifest FROM scenes').fetchall():
+        manifest=json.loads(row['manifest']);changed=False
+        for layer in manifest.get('layers',[]):
+            if layer.get('media_id')==old_id:
+                layer['media_id']=new_id;changed=True
+        if changed:c.execute('UPDATE scenes SET manifest=? WHERE id=?',(json.dumps(manifest),row['id']))
+
+
+def reconcile_media(c,physical):
+    """Never remove a physical file. Repair only unambiguous matches."""
+    rows=[dict(r) for r in c.execute('SELECT * FROM media ORDER BY rowid')]
+    by_path={}
+    for row in rows:by_path.setdefault(row['filename'],[]).append(row)
+    # Exact duplicate path: prefer a referenced ID, then the earliest existing ID.
+    references=set()
+    for row in c.execute('SELECT items FROM playlists'):
+        references.update(json.loads(row['items']))
+    for row in c.execute('SELECT manifest FROM scenes'):
+        references.update(x.get('media_id') for x in json.loads(row['manifest']).get('layers',[]))
+    for path,duplicates in by_path.items():
+        if len(duplicates)<2:continue
+        duplicates.sort(key=lambda r:(r['id'] not in references,rows.index(r)))
+        winner=duplicates[0]
+        for duplicate in duplicates[1:]:
+            replace_media_refs(c,duplicate['id'],winner['id'])
+            c.execute('DELETE FROM media WHERE id=?',(duplicate['id'],))
+    rows=[dict(r) for r in c.execute('SELECT * FROM media ORDER BY rowid')]
+    occupied={r['filename'] for r in rows if r['filename'] in physical}
+    missing=[r for r in rows if r['filename'] not in physical]
+    unindexed=set(physical)-occupied
+    # If exactly one real file has a given basename and every index record
+    # for that basename refers to that file or to a missing path, consolidate.
+    # Never merge when two real files share a basename.
+    names={Path(r['filename']).name for r in missing}
+    for name in names:
+        actual=[path for path in physical if Path(path).name==name]
+        if len(actual)!=1:continue
+        target=actual[0]
+        candidates=[r for r in missing if Path(r['filename']).name==name]
+        existing=[r for r in c.execute('SELECT * FROM media WHERE filename=?',(target,))]
+        combined=existing+candidates
+        if not combined:continue
+        # Keep a referenced ID when possible, otherwise the oldest row.
+        combined.sort(key=lambda r:(r['id'] not in references, next((i for i,x in enumerate(rows) if x['id']==r['id']),999999)))
+        winner=combined[0]
+        for duplicate in combined[1:]:
+            replace_media_refs(c,duplicate['id'],winner['id'])
+            c.execute('DELETE FROM media WHERE id=?',(duplicate['id'],))
+        c.execute('UPDATE media SET filename=?,folder_id=?,name=? WHERE id=?',
+                  (target,physical[target],name,winner['id']))
+        unindexed.discard(target)
+    return unindexed
+
+
 def sync_media():
-    with db() as c:
-        paths={r['filename'] for r in c.execute('SELECT filename FROM media')}
-        known={str(folder_path(c,r['id'])):r['id'] for r in c.execute('SELECT id FROM folders')}
-        for root,dirs,files in os.walk(MEDIA,followlinks=False):
-            dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink() and not d.startswith('.')]
-            relative=Path(root).relative_to(MEDIA)
-            parent=None;walk=Path()
-            for part in relative.parts:
-                walk=walk/part;key=str(walk)
-                if key not in known:
-                    ident=uuid4().hex
-                    c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,part,parent));known[key]=ident
-                parent=known[key]
-            for filename in files:
-                full=Path(root)/filename
-                if full.is_symlink() or full.suffix.lower() not in TYPES:continue
-                rel=str(full.relative_to(MEDIA))
-                if rel in paths:continue
-                mime,kind=TYPES[full.suffix.lower()]
-                c.execute('INSERT INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',(uuid4().hex,filename,rel,kind,mime,parent))
-                paths.add(rel)
+    # Serialize concurrent HTTP requests so the same file is never imported twice.
+    import threading
+    with _media_sync_lock:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            known={str(folder_path(c,r['id'])):r['id'] for r in c.execute('SELECT id FROM folders')}
+            physical={}
+            for root,dirs,files in os.walk(MEDIA,followlinks=False):
+                dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink() and not d.startswith('.')]
+                relative=Path(root).relative_to(MEDIA)
+                parent=None;walk=Path()
+                for part in relative.parts:
+                    walk=walk/part;key=str(walk)
+                    if key not in known:
+                        ident=uuid4().hex
+                        c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,part,parent));known[key]=ident
+                    parent=known[key]
+                for filename in files:
+                    full=Path(root)/filename
+                    if full.is_symlink() or full.suffix.lower() not in TYPES:continue
+                    physical[str(full.relative_to(MEDIA))]=parent
+            # A backup precedes any destructive metadata cleanup, but never touches media files.
+            if c.execute('SELECT 1 FROM media LIMIT 1').fetchone():backup_index()
+            unindexed=reconcile_media(c,physical)
+            for rel in sorted(unindexed):
+                mime,kind=TYPES[Path(rel).suffix.lower()]
+                c.execute('INSERT INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',
+                          (uuid4().hex,Path(rel).name,rel,kind,mime,physical[rel]))
+
+
+import threading
+_media_sync_lock=threading.Lock()
 
 def digest(v): return hashlib.sha256(v.encode()).hexdigest()
 def hash_password(p,s): return hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=2**14,r=8,p=1).hex()
@@ -125,7 +205,7 @@ class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.4.4'}
+def health(): return {'status':'ok','version':'0.4.5'}
 @app.get('/api/status')
 def status():
     with db() as c: return {'setup_required':c.execute('SELECT 1 FROM admin').fetchone() is None}
@@ -250,7 +330,10 @@ def bulk_delete(body:BulkDelete,_:None=Depends(admin)):
             if row:
                 c.execute('DELETE FROM media WHERE id=?',(ident,))
                 removed.append(row['filename'])
-    for name in removed:(MEDIA/name).unlink(missing_ok=True)
+    with db() as c:
+        for name in removed:
+            if not c.execute('SELECT 1 FROM media WHERE filename=?',(name,)).fetchone():
+                (MEDIA/name).unlink(missing_ok=True)
     return {'deleted':len(removed)}
 @app.delete('/api/media/{ident}')
 def delete_media(ident:str,_:None=Depends(admin)):
@@ -258,7 +341,9 @@ def delete_media(ident:str,_:None=Depends(admin)):
         row=c.execute('SELECT filename FROM media WHERE id=?',(ident,)).fetchone()
         if not row:raise HTTPException(404)
         c.execute('DELETE FROM media WHERE id=?',(ident,))
-    (MEDIA/row['filename']).unlink(missing_ok=True)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM media WHERE filename=?',(row['filename'],)).fetchone():
+            (MEDIA/row['filename']).unlink(missing_ok=True)
     return {'ok':True}
 
 def validate_scene(scene:Scene):

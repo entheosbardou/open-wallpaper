@@ -59,3 +59,7 @@ Fixed layer creation on LAN HTTP deployments by replacing direct `crypto.randomU
 Place images or videos in the persistent Docker data volume under `media/`, including nested directories. The server discovers supported files when the Media or Folders API is loaded and adds them to the database without duplicating previously imported paths. Existing media IDs and playlist/scene references are retained.
 
 Selecting a folder in the dashboard before uploading now writes files to that folder on disk, preserving the original filename (adding `(1)`, `(2)` etc. on collisions). Moving, renaming, and deleting folders in the dashboard also updates the physical files. Deleting a folder moves its media to the root Unsorted area. Back up the Docker data volume before upgrading.
+
+## Media index repair (v0.4.5)
+
+Opening Media Library performs a serialized filesystem reconciliation. Before the first repair, the server creates `data/app.sqlite3.before-media-repair-v045.bak` using SQLite's online backup API. Exact duplicate file paths are consolidated, and old paths are consolidated with a new path only when the physical filename is unambiguous. Scene and playlist media references are remapped to the surviving ID. Physical media files are never deleted by repair. Ambiguous same-name files are left alone rather than guessed. Keep a separate backup of the Docker volume before upgrading.
