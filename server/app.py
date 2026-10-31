@@ -399,7 +399,7 @@ def remove_share(kind:str,ident:str,recipient_id:str,u:dict=Depends(require('sha
 # OpenID Connect: authorization-code + PKCE; validated ID token via provider JWKS.
 async def oidc_metadata():
     import httpx
-    issuer=os.getenv('OIDC_ISSUER','').rstrip('/')
+    issuer=os.getenv('OIDC_ISSUER','').rstrip()
     if not issuer.startswith('https://') or not os.getenv('OIDC_CLIENT_ID'):raise HTTPException(404,'OIDC not configured with HTTPS issuer')
     async with httpx.AsyncClient(timeout=15,follow_redirects=False) as client:
         r=await client.get(issuer+'/.well-known/openid-configuration');r.raise_for_status();meta=r.json()
