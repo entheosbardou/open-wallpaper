@@ -67,3 +67,7 @@ Opening Media Library performs a serialized filesystem reconciliation. Before th
 ## Folder-aware playlists and scenes (v0.4.6)
 
 Playlists can select files and entire folders recursively. Folder selections are stored by folder ID and expanded on each device config request, so new media discovered under those folders is included automatically. Scene Studio supports dynamic folder slideshow layers and adding a folder's current contents as individual static layers (40-layer scene limit). File pickers display relative folder paths. Legacy playlists remain compatible.
+
+
+### Android reverse-proxy HTTPS pairing diagnostics (v0.4.8)
+Android now displays TLS, DNS, timeout, HTTP status and reverse-proxy redirect details instead of `Error: null`. POST redirects are not silently followed (which can lose the request body). For external HTTPS pairing, configure `PUBLIC_URL=https://your.domain` on the server, use a publicly trusted full-chain certificate, and ensure the reverse proxy forwards `/api/*` without redirecting POST requests. Do not disable Android certificate verification.

@@ -5,6 +5,11 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.UnknownHostException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
+import java.io.IOException
 
 object Server {
  private fun prefs(c:Context)=c.getSharedPreferences("settings",Context.MODE_PRIVATE)
@@ -12,12 +17,42 @@ object Server {
  fun token(c:Context)=prefs(c).getString("token","")!!
  fun configure(c:Context,url:String){prefs(c).edit().putString("url",url.trim().trimEnd('/')).remove("token").apply()}
  fun saveToken(c:Context,t:String){prefs(c).edit().putString("token",t).apply()}
+ // Preserve the original cause so TLS, DNS, proxy and HTTP failures are actionable.
+ fun describeError(error:Throwable):String {
+  val chain=generateSequence(error){it.cause}.take(6).toList()
+  val cause=chain.last()
+  val detail=chain.mapNotNull{it.message?.takeIf(String::isNotBlank)}.distinct().joinToString(" → ")
+  val category=when {
+   chain.any{it is SSLHandshakeException || it is SSLPeerUnverifiedException} -> "HTTPS certificate/TLS failure"
+   chain.any{it is UnknownHostException} -> "DNS lookup failed"
+   chain.any{it is SocketTimeoutException} -> "Connection timed out"
+   else -> error.javaClass.simpleName.ifBlank { cause.javaClass.simpleName }
+  }
+  return if(detail.isNotEmpty())"$category: $detail" else "$category (${cause.javaClass.name})"
+ }
  fun request(c:Context,path:String,body:JSONObject?=null):JSONObject {
-  val conn=(URL(url(c)+path).openConnection() as HttpURLConnection)
+  val endpoint=url(c)+path
+  val conn=(URL(endpoint).openConnection() as HttpURLConnection)
   conn.connectTimeout=12000;conn.readTimeout=20000
-  if(token(c).isNotEmpty()) conn.setRequestProperty("Authorization","Bearer "+token(c))
-  if(body!=null){conn.requestMethod="POST";conn.doOutput=true;conn.setRequestProperty("Content-Type","application/json");conn.outputStream.use{it.write(body.toString().toByteArray())}}
-  try {val status=conn.responseCode;val text=(if(status in 200..299)conn.inputStream else conn.errorStream).bufferedReader().use{it.readText()};if(status !in 200..299)throw IllegalStateException("HTTP $status: $text");return JSONObject(text)} finally {conn.disconnect()}
+  // Do not silently turn a POST into a GET when a reverse proxy redirects it.
+  conn.instanceFollowRedirects=false
+  conn.setRequestProperty("Accept","application/json")
+  if(token(c).isNotEmpty())conn.setRequestProperty("Authorization","Bearer "+token(c))
+  try {
+   if(body!=null){
+    conn.requestMethod="POST";conn.doOutput=true
+    conn.setRequestProperty("Content-Type","application/json; charset=utf-8")
+    conn.outputStream.use{it.write(body.toString().toByteArray(Charsets.UTF_8))}
+   }
+   val status=conn.responseCode
+   if(status in 300..399){
+    val location=conn.getHeaderField("Location")?:"(no Location header)"
+    throw IOException("HTTP $status redirect to $location. Set the server URL to the final HTTPS address; check reverse proxy redirects and /api routing.")
+   }
+   val text=(if(status in 200..299)conn.inputStream else conn.errorStream)?.bufferedReader()?.use{it.readText()}?:""
+   if(status !in 200..299)throw IOException("HTTP $status from $endpoint: ${text.take(600)}")
+   try{return JSONObject(text)}catch(e:Exception){throw IOException("Invalid JSON from $endpoint (HTTP $status): ${text.take(250)}",e)}
+  } finally {conn.disconnect()}
  }
  fun sync(c:Context):JSONObject {
   val result=request(c,"/api/device/config");val scene=result.optJSONObject("scene")

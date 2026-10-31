@@ -48,7 +48,7 @@ class MainActivity:Activity(){
   setContentView(ScrollView(this).apply{addView(layout)})
   handlePairingLink(intent)
  }
- private fun runAsync(job:()->Unit){thread{try{job()}catch(e:Exception){main.post{status.text="Error: ${e.message}"}}}}
+ private fun runAsync(job:()->Unit){thread{try{job()}catch(e:Exception){main.post{status.text="Error: ${Server.describeError(e)}"}}}}
  private fun openScanner(){
   if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
    requestPermissions(arrayOf(Manifest.permission.CAMERA),CAMERA_REQUEST)
@@ -63,7 +63,7 @@ class MainActivity:Activity(){
     setBeepEnabled(false)
     setOrientationLocked(false)
    }.initiateScan()
-  }catch(e:Exception){status.text="Unable to open scanner: ${e.message}"}
+  }catch(e:Exception){status.text="Unable to open scanner: ${Server.describeError(e)}"}
  }
  override fun onRequestPermissionsResult(requestCode:Int,permissions:Array<out String>,grantResults:IntArray){
   super.onRequestPermissionsResult(requestCode,permissions,grantResults)
@@ -96,7 +96,7 @@ class MainActivity:Activity(){
     waiting=false
     main.post{status.text="Paired successfully! Assign a scene or playlist in the dashboard, then sync."}
    }
-  }catch(e:Exception){status.text="QR pairing error: ${e.message}"}
+  }catch(e:Exception){status.text="QR pairing error: ${Server.describeError(e)}"}
  }
  override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
   val result=IntentIntegrator.parseActivityResult(requestCode,resultCode,data)
