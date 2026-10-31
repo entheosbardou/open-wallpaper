@@ -1,4 +1,4 @@
-import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time
+import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, base64, io
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -30,6 +30,7 @@ def init():
         CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL,scene_id TEXT,created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS pairing(code_hash TEXT PRIMARY KEY,device_name TEXT NOT NULL,expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY,name TEXT NOT NULL,items TEXT NOT NULL,interval_seconds INTEGER NOT NULL,shuffle INTEGER NOT NULL); ''')
+        c.execute('CREATE TABLE IF NOT EXISTS qr_invites(token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS folders(id TEXT PRIMARY KEY,name TEXT NOT NULL,parent_id TEXT REFERENCES folders(id) ON DELETE RESTRICT)')
         for table,column in [('media','folder_id TEXT'),('devices','playlist_id TEXT')]:
             if column.split()[0] not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')]: c.execute(f'ALTER TABLE {table} ADD COLUMN {column}')
@@ -253,6 +254,38 @@ def delete_playlist(ident:str,_:None=Depends(admin)):
 @app.get('/api/devices')
 def devices(_:None=Depends(admin)):
     with db() as c:return [{k:r[k] for k in ('id','name','scene_id','playlist_id','created')} for r in c.execute('SELECT * FROM devices')]
+@app.post('/api/pairing/qr')
+def create_qr_pairing(req:Request,_:None=Depends(admin)):
+    import qrcode
+    from urllib.parse import quote
+    token=secrets.token_urlsafe(32)
+    expires=int(time.time())+300
+    with db() as c:
+        c.execute('DELETE FROM qr_invites WHERE expires<?',(int(time.time()),))
+        c.execute('INSERT INTO qr_invites VALUES(?,?)',(digest(token),expires))
+    base=os.environ.get('PUBLIC_URL','').strip().rstrip('/') or str(req.base_url).rstrip('/')
+    if not (base.startswith('http://') or base.startswith('https://')):raise HTTPException(500,'Invalid PUBLIC_URL')
+    payload='openwallpaper://pair?server='+quote(base,safe='')+'&token='+token
+    img=qrcode.make(payload)
+    output=io.BytesIO();img.save(output,format='PNG')
+    return {'image':'data:image/png;base64,'+base64.b64encode(output.getvalue()).decode(),'expires_in':300,'server':base}
+
+class QRClaim(BaseModel):
+    token:str
+    name:str=Field(default='Android device',max_length=80)
+
+@app.post('/api/pairing/qr/claim')
+def claim_qr_pairing(body:QRClaim):
+    now=int(time.time())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT expires FROM qr_invites WHERE token_hash=?',(digest(body.token),)).fetchone()
+        if not row or row['expires']<now:raise HTTPException(404,'QR code expired or already used')
+        c.execute('DELETE FROM qr_invites WHERE token_hash=?',(digest(body.token),))
+        device_token=secrets.token_urlsafe(36);ident=uuid4().hex
+        c.execute('INSERT INTO devices(id,name,token_hash,scene_id,created,playlist_id) VALUES(?,?,?,?,?,?)',(ident,body.name,digest(device_token),None,now,None))
+    return {'token':device_token,'device_id':ident}
+
 @app.post('/api/pairing')
 def pairing(body:dict):
     name=str(body.get('name','Android device'))[:80]
@@ -267,7 +300,7 @@ def approve(body:Pair,_:None=Depends(admin)):
         row=c.execute('SELECT * FROM pairing WHERE code_hash=?',(digest(body.code),)).fetchone()
         if not row or row['expires']<time.time():raise HTTPException(404,'Code expired or invalid')
         token=secrets.token_urlsafe(36);ident=uuid4().hex
-        c.execute('INSERT INTO devices VALUES(?,?,?,?,?)',(ident,row['device_name'],digest(token),None,int(time.time())))
+        c.execute('INSERT INTO devices(id,name,token_hash,scene_id,created) VALUES(?,?,?,?,?)',(ident,row['device_name'],digest(token),None,int(time.time())))
         c.execute('DELETE FROM pairing WHERE code_hash=?',(digest(body.code),))
     # Device receives token through one-time polling, implemented in /api/pairing/claim.
     with db() as c:c.execute('CREATE TABLE IF NOT EXISTS claims(code_hash TEXT PRIMARY KEY, token TEXT NOT NULL, expires INTEGER NOT NULL)');c.execute('INSERT INTO claims VALUES(?,?,?)',(digest(body.code),token,int(time.time())+600))
