@@ -71,3 +71,55 @@ Playlists can select files and entire folders recursively. Folder selections are
 
 ### Android reverse-proxy HTTPS pairing diagnostics (v0.4.8)
 Android now displays TLS, DNS, timeout, HTTP status and reverse-proxy redirect details instead of `Error: null`. POST redirects are not silently followed (which can lose the request body). For external HTTPS pairing, configure `PUBLIC_URL=https://your.domain` on the server, use a publicly trusted full-chain certificate, and ensure the reverse proxy forwards `/api/*` without redirecting POST requests. Do not disable Android certificate verification.
+
+## v0.5.0 — Multi-user access (security preview)
+
+**Back up `/app/data` before upgrading.** The server creates a one-time SQLite snapshot at
+`/app/data/app.sqlite3.before-multiuser-v050.bak` before applying the additive migration.
+The existing local administrator, sessions, scenes, playlists and paired devices are retained;
+legacy content is assigned to the existing administrator. New scenes and playlists are private.
+
+### Accounts and permissions
+
+The **Users & access** dashboard tab is available to administrators. Administrators can create
+local accounts, enable/disable accounts, assign `admin` or `user` roles, and override each
+user's permissions. Admins can view and manage all content. Regular users see their own
+scenes, playlists and devices, plus scenes/playlists explicitly shared with them.
+
+To share a saved scene or playlist, open it and click **Share**. Enter the recipient's user
+ID; `*` shares with all authenticated users. Choose whether to allow editing. Sharing
+requires the `sharing.manage` permission and ownership (or admin role).
+
+Default regular-user permissions: media view/upload, scene and playlist creation,
+device pairing, and sharing. Media library is shared among users; media deletion and folder
+management are restricted by separate permissions. Disable `media.upload` if users should
+only consume shared assets.
+
+### OpenID Connect
+
+Configure the container with:
+
+```yaml
+services:
+  open-wallpaper:
+    environment:
+      - PUBLIC_URL=https://live-wallpaper.thelinclan.com
+      - OIDC_ISSUER=https://auth.example.com/application/o/open-wallpaper/
+      - OIDC_CLIENT_ID=your-client-id
+      - OIDC_CLIENT_SECRET=your-client-secret
+      - OIDC_AUTO_PROVISION=1
+```
+
+Register `https://live-wallpaper.thelinclan.com/api/oidc/callback` as the provider's
+**exact redirect URI**. The issuer must match the provider's discovery document issuer,
+and its endpoints must use HTTPS. This uses the authorization-code flow with PKCE,
+server-side state and nonce, provider JWKS validation and issuer/audience checks.
+`OIDC_AUTO_PROVISION=1` creates new OIDC users with the regular-user role. Leave it unset
+to allow only pre-linked accounts. Admins can pre-link a local user via
+`PATCH /api/users/{id}` with `oidc_issuer` and `oidc_sub` matching the provider's
+subject identifier; **never guess or use email as the subject**. Local administrator
+login remains available for recovery. This release supports one OIDC issuer.
+
+**Important:** Do not put this behind a public hostname until you have tested user isolation,
+provider configuration and your proxy. This release has automated smoke tests but has
+not undergone an independent security audit or production OIDC integration test.
