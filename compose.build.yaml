@@ -1,0 +1,4 @@
+services:
+  wallpaper-server:
+    build: .
+    image: open-wallpaper:local
