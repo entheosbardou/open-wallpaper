@@ -53,3 +53,9 @@ Android requests CAMERA permission before opening the embedded ZXing scanner, an
 ## v0.4.3 scene layer editor fix
 
 Fixed layer creation on LAN HTTP deployments by replacing direct `crypto.randomUUID()` calls with a secure random UUID fallback using `crypto.getRandomValues()`. This affects media, playlist, clock, and create-from-selected scene layers. Rebuild/redeploy the Docker server and hard-refresh the dashboard; the Android APK does not need rebuilding for this change.
+
+## Media folders and automatic import (v0.4.4)
+
+Place images or videos in the persistent Docker data volume under `media/`, including nested directories. The server discovers supported files when the Media or Folders API is loaded and adds them to the database without duplicating previously imported paths. Existing media IDs and playlist/scene references are retained.
+
+Selecting a folder in the dashboard before uploading now writes files to that folder on disk, preserving the original filename (adding `(1)`, `(2)` etc. on collisions). Moving, renaming, and deleting folders in the dashboard also updates the physical files. Deleting a folder moves its media to the root Unsorted area. Back up the Docker data volume before upgrading.

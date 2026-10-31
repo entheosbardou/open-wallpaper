@@ -2,7 +2,7 @@ import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, base64, io
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -12,7 +12,7 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.4.0',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.4.4',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -35,6 +35,50 @@ def init():
         for table,column in [('media','folder_id TEXT'),('devices','playlist_id TEXT')]:
             if column.split()[0] not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')]: c.execute(f'ALTER TABLE {table} ADD COLUMN {column}')
 init()
+
+def folder_path(c, fid):
+    parts=[];seen=set()
+    while fid:
+        if fid in seen:raise HTTPException(400,'Folder cycle')
+        seen.add(fid)
+        row=c.execute('SELECT name,parent_id FROM folders WHERE id=?',(fid,)).fetchone()
+        if not row:raise HTTPException(404,'Folder not found')
+        parts.append(row['name']);fid=row['parent_id']
+    return Path(*reversed(parts)) if parts else Path()
+
+def folder_name(name):
+    name=name.strip()
+    if not name or name in ('.','..') or '/' in name or chr(92) in name or any(ord(x)<32 for x in name):raise HTTPException(400,'Invalid folder name')
+    return name
+
+def unique_file(directory,name):
+    name=Path(name).name;stem=Path(name).stem;ext=Path(name).suffix
+    target=directory/name;i=1
+    while target.exists():target=directory/f'{stem} ({i}){ext}';i+=1
+    return target
+
+def sync_media():
+    with db() as c:
+        paths={r['filename'] for r in c.execute('SELECT filename FROM media')}
+        known={str(folder_path(c,r['id'])):r['id'] for r in c.execute('SELECT id FROM folders')}
+        for root,dirs,files in os.walk(MEDIA,followlinks=False):
+            dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink() and not d.startswith('.')]
+            relative=Path(root).relative_to(MEDIA)
+            parent=None;walk=Path()
+            for part in relative.parts:
+                walk=walk/part;key=str(walk)
+                if key not in known:
+                    ident=uuid4().hex
+                    c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,part,parent));known[key]=ident
+                parent=known[key]
+            for filename in files:
+                full=Path(root)/filename
+                if full.is_symlink() or full.suffix.lower() not in TYPES:continue
+                rel=str(full.relative_to(MEDIA))
+                if rel in paths:continue
+                mime,kind=TYPES[full.suffix.lower()]
+                c.execute('INSERT INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',(uuid4().hex,filename,rel,kind,mime,parent))
+                paths.add(rel)
 
 def digest(v): return hashlib.sha256(v.encode()).hexdigest()
 def hash_password(p,s): return hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=2**14,r=8,p=1).hex()
@@ -81,7 +125,7 @@ class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.4.0'}
+def health(): return {'status':'ok','version':'0.4.4'}
 @app.get('/api/status')
 def status():
     with db() as c: return {'setup_required':c.execute('SELECT 1 FROM admin').fetchone() is None}
@@ -107,22 +151,24 @@ def logout(req:Request, _:None=Depends(admin)):
 
 @app.get('/api/media')
 def media_list(_:None=Depends(admin)):
+    sync_media()
     with db() as c:return [clean_media(r) for r in c.execute('SELECT * FROM media ORDER BY name')]
 @app.post('/api/media')
-async def upload(file:UploadFile=File(...),_:None=Depends(admin)):
-    suffix=Path(file.filename or '').suffix.lower()
+async def upload(file:UploadFile=File(...),folder_id:str|None=Form(None),_:None=Depends(admin)):
+    name=Path(file.filename or '').name;suffix=Path(name).suffix.lower()
     if suffix not in TYPES:raise HTTPException(400,'Unsupported file type')
-    mime,kind=TYPES[suffix];ident=uuid4().hex;dest=MEDIA/(ident+suffix);size=0
+    mime,kind=TYPES[suffix];ident=uuid4().hex;size=0
+    with db() as c:directory=MEDIA/folder_path(c,folder_id)
+    directory.mkdir(parents=True,exist_ok=True);dest=unique_file(directory,name)
     try:
-        with dest.open('wb') as f:
+        with dest.open('xb') as out:
             while chunk:=await file.read(1024*1024):
                 size+=len(chunk)
                 if size>MAX_BYTES:raise HTTPException(413,'Maximum upload size is 100 MB')
-                f.write(chunk)
-        if size==0:raise HTTPException(400,'Empty file')
-        with db() as c:c.execute('INSERT INTO media(id,name,filename,kind,mime) VALUES(?,?,?,?,?)',(ident,Path(file.filename).name[:200],dest.name,kind,mime))
-    except Exception:
-        dest.unlink(missing_ok=True);raise
+                out.write(chunk)
+        if not size:raise HTTPException(400,'Empty file')
+        with db() as c:c.execute('INSERT INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',(ident,dest.name,str(dest.relative_to(MEDIA)),kind,mime,folder_id))
+    except Exception:dest.unlink(missing_ok=True);raise
     return {'id':ident,'url':'/api/media/'+ident+'/file'}
 @app.get('/api/media/{ident}/file')
 def media_file(ident:str,req:Request):
@@ -134,40 +180,65 @@ def media_file(ident:str,req:Request):
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'],headers={'Cache-Control':'private, max-age=3600'})
 @app.get('/api/folders')
 def folders(_:None=Depends(admin)):
+    sync_media()
     with db() as c:return [dict(x) for x in c.execute('SELECT * FROM folders ORDER BY name')]
 @app.post('/api/folders')
 def add_folder(body:FolderInput,_:None=Depends(admin)):
-    ident=uuid4().hex
+    ident=uuid4().hex;name=folder_name(body.name)
     with db() as c:
         if body.parent_id and not c.execute('SELECT 1 FROM folders WHERE id=?',(body.parent_id,)).fetchone():raise HTTPException(404,'Parent folder not found')
-        c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,body.name,body.parent_id))
+        target=MEDIA/folder_path(c,body.parent_id)/name
+        if target.exists():raise HTTPException(409,'Folder already exists')
+        target.mkdir(parents=True)
+        c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,name,body.parent_id))
     return {'id':ident}
 @app.put('/api/folders/{ident}')
 def rename_folder(ident:str,body:FolderInput,_:None=Depends(admin)):
+    name=folder_name(body.name)
     with db() as c:
-        if body.parent_id==ident:raise HTTPException(400,'Cannot parent folder to itself')
-        parent=body.parent_id
-        while parent:
-            if parent==ident:raise HTTPException(400,'Folder cycle')
-            row=c.execute('SELECT parent_id FROM folders WHERE id=?',(parent,)).fetchone()
-            if not row:raise HTTPException(404,'Parent folder not found')
-            parent=row['parent_id']
-        cur=c.execute('UPDATE folders SET name=?,parent_id=? WHERE id=?',(body.name,body.parent_id,ident))
-        if not cur.rowcount:raise HTTPException(404)
+        old=folder_path(c,ident);parent=folder_path(c,body.parent_id);new=parent/name
+        if parent==old or old in parent.parents:raise HTTPException(400,'Folder cycle')
+        if new!=old and (MEDIA/new).exists():raise HTTPException(409,'Destination folder exists')
+        (MEDIA/old).mkdir(parents=True,exist_ok=True)
+        (MEDIA/new).parent.mkdir(parents=True,exist_ok=True)
+        if new!=old:(MEDIA/old).rename(MEDIA/new)
+        c.execute('UPDATE folders SET name=?,parent_id=? WHERE id=?',(name,body.parent_id,ident))
+        prefix=str(old)+'/'
+        for row in c.execute('SELECT id,filename FROM media').fetchall():
+            if row['filename'].startswith(prefix):
+                c.execute('UPDATE media SET filename=? WHERE id=?',(str(new/row['filename'][len(prefix):]),row['id']))
     return {'ok':True}
+
 @app.delete('/api/folders/{ident}')
 def remove_folder(ident:str,_:None=Depends(admin)):
     with db() as c:
         if c.execute('SELECT 1 FROM folders WHERE parent_id=?',(ident,)).fetchone():raise HTTPException(409,'Move or delete subfolders first')
-        c.execute('UPDATE media SET folder_id=NULL WHERE folder_id=?',(ident,))
-        cur=c.execute('DELETE FROM folders WHERE id=?',(ident,))
-        if not cur.rowcount:raise HTTPException(404)
+        rel=folder_path(c,ident)
+        for row in c.execute('SELECT id,filename FROM media WHERE folder_id=?',(ident,)).fetchall():
+            src=MEDIA/row['filename'];dest=unique_file(MEDIA,src.name)
+            if src.exists():src.rename(dest)
+            c.execute('UPDATE media SET filename=?,name=?,folder_id=NULL WHERE id=?',(dest.name,dest.name,row['id']))
+        folder=MEDIA/rel
+        if folder.exists():
+            try:folder.rmdir()
+            except OSError:raise HTTPException(409,'Folder contains unindexed files')
+        c.execute('DELETE FROM folders WHERE id=?',(ident,))
     return {'ok':True}
+
 @app.post('/api/media/move')
 def move_media(body:MoveMedia,_:None=Depends(admin)):
     with db() as c:
-        if body.folder_id and not c.execute('SELECT 1 FROM folders WHERE id=?',(body.folder_id,)).fetchone():raise HTTPException(404,'Folder not found')
-        for ident in set(body.ids):c.execute('UPDATE media SET folder_id=? WHERE id=?',(body.folder_id,ident))
+        directory=MEDIA/folder_path(c,body.folder_id);directory.mkdir(parents=True,exist_ok=True)
+        for ident in set(body.ids):
+            row=c.execute('SELECT filename FROM media WHERE id=?',(ident,)).fetchone()
+            if not row:continue
+            src=MEDIA/row['filename']
+            if src.parent==directory:
+                c.execute('UPDATE media SET folder_id=? WHERE id=?',(body.folder_id,ident));continue
+            dest=unique_file(directory,src.name)
+            if not src.exists():raise HTTPException(404,'Media file missing')
+            src.rename(dest)
+            c.execute('UPDATE media SET filename=?,name=?,folder_id=? WHERE id=?',(str(dest.relative_to(MEDIA)),dest.name,body.folder_id,ident))
     return {'ok':True}
 
 @app.post('/api/media/bulk-delete')
