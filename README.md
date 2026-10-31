@@ -49,3 +49,7 @@ Open http://localhost:8080 and create the administrator account.
 ## v0.4.2 QR scanner repair
 
 Android requests CAMERA permission before opening the embedded ZXing scanner, and registers an `openwallpaper://pair` VIEW/BROWSABLE intent filter so external QR apps can offer Open Wallpaper as a handler. Some stock camera apps do not open non-HTTP custom links; in that case use the in-app Scan button or a QR scanner that supports custom URI schemes. The device must reach the server URL encoded in the QR code.
+
+## v0.4.3 scene layer editor fix
+
+Fixed layer creation on LAN HTTP deployments by replacing direct `crypto.randomUUID()` calls with a secure random UUID fallback using `crypto.getRandomValues()`. This affects media, playlist, clock, and create-from-selected scene layers. Rebuild/redeploy the Docker server and hard-refresh the dashboard; the Android APK does not need rebuilding for this change.
