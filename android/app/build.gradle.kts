@@ -6,4 +6,7 @@ android {
  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
  kotlinOptions { jvmTarget = "17" }
 }
-\ndependencies { implementation("com.journeyapps:zxing-android-embedded:4.3.0") }\n
+
+dependencies {
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+}
