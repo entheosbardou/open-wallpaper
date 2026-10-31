@@ -1,6 +1,6 @@
 services:
   wallpaper-server:
-    image: ghcr.io/REPLACE_WITH_GITHUB_OWNER/open-wallpaper:latest
+    image: ghcr.io/entheosbardou/open-wallpaper:latest
     ports:
       - "8080:8080"
     volumes:
