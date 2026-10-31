@@ -7,6 +7,7 @@ import android.os.HandlerThread
 import android.service.wallpaper.WallpaperService
 import android.view.SurfaceHolder
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -20,15 +21,43 @@ class Wallpaper:WallpaperService(){
   private val handler=Handler(worker.looper)
   private var visible=false
   private var scene:JSONObject?=null
+  private var config:JSONObject?=null
+  private val playlistStart=System.currentTimeMillis()
   private var player:MediaPlayer?=null
   private var videoId:String?=null
   private val paint=Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-  private val tick=object:Runnable{override fun run(){if(!visible)return;draw();handler.postDelayed(this,1000)}}
+  private val tick=object:Runnable{override fun run(){if(!visible)return;setupVideo();draw();handler.postDelayed(this,1000)}}
   private val refresh=object:Runnable{override fun run(){if(!visible)return;thread{try{Server.sync(this@Wallpaper);handler.post{load()}}catch(_:Exception){}};handler.postDelayed(this,60000)}}
   override fun onVisibilityChanged(v:Boolean){visible=v;if(v){load();handler.removeCallbacks(tick);handler.post(tick);handler.post(refresh);player?.start()}else{handler.removeCallbacks(tick);handler.removeCallbacks(refresh);player?.pause()}}
   override fun onSurfaceChanged(h:SurfaceHolder,f:Int,w:Int,he:Int){super.onSurfaceChanged(h,f,w,he);handler.post{load();draw()}}
-  private fun load(){try{scene=JSONObject(File(filesDir,"scene.json").readText()).optJSONObject("scene")}catch(_:Exception){scene=null};setupVideo()}
-  private fun setupVideo(){val layers=scene?.optJSONArray("layers");var id:String?=null;if(layers!=null)for(i in 0 until layers.length()){val layer=layers.optJSONObject(i)?:continue;if(layer.optString("type")=="video"){id=layer.optString("media_id");break}}
+  private fun load(){try{config=JSONObject(File(filesDir,"scene.json").readText());scene=config?.optJSONObject("scene")}catch(_:Exception){config=null;scene=null};setupVideo()}
+  private fun playlistLayer(playlist:JSONObject?):JSONObject?{
+   val ids=playlist?.optJSONArray("media_ids")?:return null
+   if(ids.length()==0)return null
+   val seconds=playlist.optLong("interval_seconds",30).coerceAtLeast(3)
+   val slot=((System.currentTimeMillis()-playlistStart)/(seconds*1000)).toInt()
+   val index=if(playlist.optBoolean("shuffle",false)){
+    val round=slot/ids.length();val order=(0 until ids.length()).shuffled(kotlin.random.Random(round));order[slot%ids.length()]
+   }else slot%ids.length()
+   val id=ids.optString(index)
+   val kind=config?.optJSONObject("media_types")?.optString(id,"image")?:"image"
+   return JSONObject().put("type",kind).put("media_id",id).put("opacity",1.0)
+  }
+  private fun resolvedLayers():List<JSONObject>{
+   val result=mutableListOf<JSONObject>()
+   val direct=config?.optJSONObject("playlist")
+   if(direct!=null){playlistLayer(direct)?.let{result.add(it)};return result}
+   val layers=scene?.optJSONArray("layers")?:return result
+   for(i in 0 until layers.length()){
+    val layer=layers.optJSONObject(i)?:continue
+    if(layer.optString("type")=="playlist"){
+     val pl=config?.optJSONObject("playlists")?.optJSONObject(layer.optString("playlist_id"))
+     playlistLayer(pl)?.let{it.put("opacity",layer.optDouble("opacity",1.0));it.put("zIndex",layer.optInt("zIndex",i));result.add(it)}
+    }else result.add(layer)
+   }
+   return result.sortedBy{it.optInt("zIndex",0)}
+  }
+  private fun setupVideo(){val layers=resolvedLayers();var id:String?=null;for(layer in layers){if(layer.optString("type")=="video"){id=layer.optString("media_id");break}}
    if(id==videoId)return;player?.release();player=null;videoId=id
    if(id!=null)try{val file=File(filesDir,"media/$id");if(file.exists()){player=MediaPlayer().apply{setDataSource(file.absolutePath);setSurface(surfaceHolder.surface);isLooping=true;prepare();if(visible)start()}}}catch(_:Exception){player?.release();player=null}
   }
@@ -36,9 +65,9 @@ class Wallpaper:WallpaperService(){
    // A video scene uses the video surface directly; do not overwrite its frames with Canvas.
    if(player!=null)return
    var canvas:Canvas?=null
-   try{canvas=surfaceHolder.lockCanvas();val c=canvas?:return;c.drawColor(Color.rgb(12,20,34));val layers=scene?.optJSONArray("layers")
-    if(layers==null){paint.color=Color.WHITE;paint.textSize=42f;c.drawText("Open Wallpaper: assign and sync a scene",30f,c.height/2f,paint);return}
-    val sorted=(0 until layers.length()).mapNotNull{layers.optJSONObject(it)}.sortedBy{it.optInt("zIndex",0)}
+   try{canvas=surfaceHolder.lockCanvas();val c=canvas?:return;c.drawColor(Color.rgb(12,20,34));val layers=resolvedLayers()
+    if(layers.isEmpty()){paint.color=Color.WHITE;paint.textSize=42f;c.drawText("Open Wallpaper: assign and sync a scene",30f,c.height/2f,paint);return}
+    val sorted=layers
     for(layer in sorted){when(layer.optString("type")){
      "image"->{val file=File(filesDir,"media/"+layer.optString("media_id"));if(!file.exists())continue
       val bitmap=BitmapFactory.decodeFile(file.absolutePath)?:continue

@@ -21,14 +21,22 @@ object Server {
  }
  fun sync(c:Context):JSONObject {
   val result=request(c,"/api/device/config");val scene=result.optJSONObject("scene")
+  val ids=mutableSetOf<String>()
   if(scene!=null){
    val layers=scene.optJSONArray("layers")
-   if(layers!=null) for(i in 0 until layers.length()) {
+   if(layers!=null) for(i in 0 until layers.length()){
     val layer=layers.optJSONObject(i)?:continue
-    val id=layer.optString("media_id")
-    if(id.isNotEmpty() && (layer.optString("type")=="image" || layer.optString("type")=="video")) download(c,id)
+    val id=layer.optString("media_id");if(id.isNotEmpty())ids.add(id)
    }
   }
+  fun collect(playlist:JSONObject?){
+   val arr=playlist?.optJSONArray("media_ids")?:return
+   for(i in 0 until arr.length())ids.add(arr.optString(i))
+  }
+  collect(result.optJSONObject("playlist"))
+  val linked=result.optJSONObject("playlists")
+  if(linked!=null){val keys=linked.keys();while(keys.hasNext())collect(linked.optJSONObject(keys.next()))}
+  for(id in ids)if(id.matches(Regex("[a-fA-F0-9]{32}")))download(c,id)
   File(c.filesDir,"scene.json").writeText(result.toString())
   return result
  }

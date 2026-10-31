@@ -12,7 +12,7 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.3.0',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.4.0',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -30,6 +30,9 @@ def init():
         CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL,scene_id TEXT,created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS pairing(code_hash TEXT PRIMARY KEY,device_name TEXT NOT NULL,expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY,name TEXT NOT NULL,items TEXT NOT NULL,interval_seconds INTEGER NOT NULL,shuffle INTEGER NOT NULL); ''')
+        c.execute('CREATE TABLE IF NOT EXISTS folders(id TEXT PRIMARY KEY,name TEXT NOT NULL,parent_id TEXT REFERENCES folders(id) ON DELETE RESTRICT)')
+        for table,column in [('media','folder_id TEXT'),('devices','playlist_id TEXT')]:
+            if column.split()[0] not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')]: c.execute(f'ALTER TABLE {table} ADD COLUMN {column}')
 init()
 
 def digest(v): return hashlib.sha256(v.encode()).hexdigest()
@@ -59,6 +62,7 @@ class Scene(BaseModel):
     canvas:dict=Field(default_factory=lambda:{'width':1920,'height':1080,'scaling':'cover'})
 class DeviceAssign(BaseModel):
     scene_id:str|None=None
+    playlist_id:str|None=None
 class Playlist(BaseModel):
     name:str=Field(min_length=1,max_length=120)
     media_ids:list[str]=Field(min_length=1,max_length=500)
@@ -66,11 +70,17 @@ class Playlist(BaseModel):
     shuffle:bool=False
 class BulkDelete(BaseModel):
     ids:list[str]=Field(min_length=1,max_length=500)
+class FolderInput(BaseModel):
+    name:str=Field(min_length=1,max_length=100)
+    parent_id:str|None=None
+class MoveMedia(BaseModel):
+    ids:list[str]=Field(min_length=1,max_length=500)
+    folder_id:str|None=None
 class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.3.0'}
+def health(): return {'status':'ok','version':'0.4.0'}
 @app.get('/api/status')
 def status():
     with db() as c: return {'setup_required':c.execute('SELECT 1 FROM admin').fetchone() is None}
@@ -109,7 +119,7 @@ async def upload(file:UploadFile=File(...),_:None=Depends(admin)):
                 if size>MAX_BYTES:raise HTTPException(413,'Maximum upload size is 100 MB')
                 f.write(chunk)
         if size==0:raise HTTPException(400,'Empty file')
-        with db() as c:c.execute('INSERT INTO media VALUES(?,?,?,?,?)',(ident,Path(file.filename).name[:200],dest.name,kind,mime))
+        with db() as c:c.execute('INSERT INTO media(id,name,filename,kind,mime) VALUES(?,?,?,?,?)',(ident,Path(file.filename).name[:200],dest.name,kind,mime))
     except Exception:
         dest.unlink(missing_ok=True);raise
     return {'id':ident,'url':'/api/media/'+ident+'/file'}
@@ -121,6 +131,44 @@ def media_file(ident:str,req:Request):
     with db() as c:row=c.execute('SELECT * FROM media WHERE id=?',(ident,)).fetchone()
     if not row:raise HTTPException(404,'Not found')
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'],headers={'Cache-Control':'private, max-age=3600'})
+@app.get('/api/folders')
+def folders(_:None=Depends(admin)):
+    with db() as c:return [dict(x) for x in c.execute('SELECT * FROM folders ORDER BY name')]
+@app.post('/api/folders')
+def add_folder(body:FolderInput,_:None=Depends(admin)):
+    ident=uuid4().hex
+    with db() as c:
+        if body.parent_id and not c.execute('SELECT 1 FROM folders WHERE id=?',(body.parent_id,)).fetchone():raise HTTPException(404,'Parent folder not found')
+        c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,body.name,body.parent_id))
+    return {'id':ident}
+@app.put('/api/folders/{ident}')
+def rename_folder(ident:str,body:FolderInput,_:None=Depends(admin)):
+    with db() as c:
+        if body.parent_id==ident:raise HTTPException(400,'Cannot parent folder to itself')
+        parent=body.parent_id
+        while parent:
+            if parent==ident:raise HTTPException(400,'Folder cycle')
+            row=c.execute('SELECT parent_id FROM folders WHERE id=?',(parent,)).fetchone()
+            if not row:raise HTTPException(404,'Parent folder not found')
+            parent=row['parent_id']
+        cur=c.execute('UPDATE folders SET name=?,parent_id=? WHERE id=?',(body.name,body.parent_id,ident))
+        if not cur.rowcount:raise HTTPException(404)
+    return {'ok':True}
+@app.delete('/api/folders/{ident}')
+def remove_folder(ident:str,_:None=Depends(admin)):
+    with db() as c:
+        if c.execute('SELECT 1 FROM folders WHERE parent_id=?',(ident,)).fetchone():raise HTTPException(409,'Move or delete subfolders first')
+        c.execute('UPDATE media SET folder_id=NULL WHERE folder_id=?',(ident,))
+        cur=c.execute('DELETE FROM folders WHERE id=?',(ident,))
+        if not cur.rowcount:raise HTTPException(404)
+    return {'ok':True}
+@app.post('/api/media/move')
+def move_media(body:MoveMedia,_:None=Depends(admin)):
+    with db() as c:
+        if body.folder_id and not c.execute('SELECT 1 FROM folders WHERE id=?',(body.folder_id,)).fetchone():raise HTTPException(404,'Folder not found')
+        for ident in set(body.ids):c.execute('UPDATE media SET folder_id=? WHERE id=?',(body.folder_id,ident))
+    return {'ok':True}
+
 @app.post('/api/media/bulk-delete')
 def bulk_delete(body:BulkDelete,_:None=Depends(admin)):
     removed=[]
@@ -143,11 +191,14 @@ def delete_media(ident:str,_:None=Depends(admin)):
 
 def validate_scene(scene:Scene):
     for layer in scene.layers:
-        if layer.get('type') not in ('image','video','web','clock'):raise HTTPException(400,'Invalid layer type')
+        if layer.get('type') not in ('image','video','web','clock','playlist'):raise HTTPException(400,'Invalid layer type')
         if layer['type'] in ('image','video'):
             ident=layer.get('media_id')
             with db() as c:r=c.execute('SELECT kind FROM media WHERE id=?',(ident,)).fetchone()
             if not r or r['kind']!=layer['type']:raise HTTPException(400,'Invalid media reference')
+        if layer['type']=='playlist':
+            with db() as c:r=c.execute('SELECT 1 FROM playlists WHERE id=?',(layer.get('playlist_id'),)).fetchone()
+            if not r:raise HTTPException(400,'Invalid playlist reference')
         if layer['type']=='web':
             # Untrusted remote websites are not embedded by the server.
             raise HTTPException(400,'Web layers are reserved for a sandboxed renderer in a future release')
@@ -195,11 +246,13 @@ def update_playlist(ident:str,p:Playlist,_:None=Depends(admin)):
     return {'ok':True}
 @app.delete('/api/playlists/{ident}')
 def delete_playlist(ident:str,_:None=Depends(admin)):
-    with db() as c:c.execute('DELETE FROM playlists WHERE id=?',(ident,))
+    with db() as c:
+        c.execute('UPDATE devices SET playlist_id=NULL WHERE playlist_id=?',(ident,))
+        c.execute('DELETE FROM playlists WHERE id=?',(ident,))
     return {'ok':True}
 @app.get('/api/devices')
 def devices(_:None=Depends(admin)):
-    with db() as c:return [{k:r[k] for k in ('id','name','scene_id','created')} for r in c.execute('SELECT * FROM devices')]
+    with db() as c:return [{k:r[k] for k in ('id','name','scene_id','playlist_id','created')} for r in c.execute('SELECT * FROM devices')]
 @app.post('/api/pairing')
 def pairing(body:dict):
     name=str(body.get('name','Android device'))[:80]
@@ -231,22 +284,50 @@ def claim(body:Pair):
 def assign(ident:str,body:DeviceAssign,_:None=Depends(admin)):
     with db() as c:
         if body.scene_id and not c.execute('SELECT 1 FROM scenes WHERE id=?',(body.scene_id,)).fetchone():raise HTTPException(404,'Scene not found')
-        cur=c.execute('UPDATE devices SET scene_id=? WHERE id=?',(body.scene_id,ident))
+        if body.playlist_id and not c.execute('SELECT 1 FROM playlists WHERE id=?',(body.playlist_id,)).fetchone():raise HTTPException(404,'Playlist not found')
+        if body.scene_id and body.playlist_id:raise HTTPException(400,'Choose scene or playlist')
+        cur=c.execute('UPDATE devices SET scene_id=?,playlist_id=? WHERE id=?',(body.scene_id,body.playlist_id,ident))
         if not cur.rowcount:raise HTTPException(404,'Device not found')
     return {'ok':True}
 @app.delete('/api/devices/{ident}')
 def revoke(ident:str,_:None=Depends(admin)):
     with db() as c:c.execute('DELETE FROM devices WHERE id=?',(ident,))
     return {'ok':True}
+def expanded_playlist(c,ident):
+    row=c.execute('SELECT * FROM playlists WHERE id=?',(ident,)).fetchone()
+    return {'id':row['id'],'name':row['name'],'media_ids':json.loads(row['items']),'interval_seconds':row['interval_seconds'],'shuffle':bool(row['shuffle'])} if row else None
+
+def device_payload(c,d):
+    scene_row=c.execute('SELECT manifest FROM scenes WHERE id=?',(d['scene_id'],)).fetchone() if d['scene_id'] else None
+    scene=json.loads(scene_row['manifest']) if scene_row else None
+    direct=expanded_playlist(c,d['playlist_id']) if d['playlist_id'] else None
+    linked={}
+    if scene:
+        for layer in scene.get('layers',[]):
+            if layer.get('type')=='playlist':
+                pid=layer.get('playlist_id')
+                linked[pid]=expanded_playlist(c,pid)
+    ids=media_ids_for_payload({'scene':scene,'playlist':direct,'playlists':linked})
+    kinds={r['id']:r['kind'] for r in c.execute('SELECT id,kind FROM media') if r['id'] in ids}
+    return {'device_id':d['id'],'scene':scene,'playlist':direct,'playlists':linked,'media_types':kinds}
+
+def media_ids_for_payload(payload):
+    ids=set()
+    if payload['scene']:
+        for layer in payload['scene'].get('layers',[]):
+            if layer.get('media_id'):ids.add(layer['media_id'])
+    for p in [payload['playlist'],*payload['playlists'].values()]:
+        if p:ids.update(p['media_ids'])
+    return ids
+
 @app.get('/api/device/config')
 def config(req:Request,d:dict=Depends(device)):
-    with db() as c:r=c.execute('SELECT manifest FROM scenes WHERE id=?',(d['scene_id'],)).fetchone() if d['scene_id'] else None
-    return {'device_id':d['id'],'scene':json.loads(r['manifest']) if r else None}
+    with db() as c:return device_payload(c,d)
 @app.get('/api/device/media/{ident}')
 def device_media(ident:str,req:Request,d:dict=Depends(device)):
     with db() as c:
         row=c.execute('SELECT * FROM media WHERE id=?',(ident,)).fetchone()
-        scene=c.execute('SELECT manifest FROM scenes WHERE id=?',(d['scene_id'],)).fetchone() if d['scene_id'] else None
-    if not row or not scene or not any(x.get('media_id')==ident for x in json.loads(scene['manifest'])['layers']):raise HTTPException(404)
+        allowed=media_ids_for_payload(device_payload(c,d))
+    if not row or ident not in allowed:raise HTTPException(404)
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'])
 app.mount('/',StaticFiles(directory=str(WEB),html=True),name='web')
