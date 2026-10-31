@@ -63,3 +63,7 @@ Selecting a folder in the dashboard before uploading now writes files to that fo
 ## Media index repair (v0.4.5)
 
 Opening Media Library performs a serialized filesystem reconciliation. Before the first repair, the server creates `data/app.sqlite3.before-media-repair-v045.bak` using SQLite's online backup API. Exact duplicate file paths are consolidated, and old paths are consolidated with a new path only when the physical filename is unambiguous. Scene and playlist media references are remapped to the surviving ID. Physical media files are never deleted by repair. Ambiguous same-name files are left alone rather than guessed. Keep a separate backup of the Docker volume before upgrading.
+
+## Folder-aware playlists and scenes (v0.4.6)
+
+Playlists can select files and entire folders recursively. Folder selections are stored by folder ID and expanded on each device config request, so new media discovered under those folders is included automatically. Scene Studio supports dynamic folder slideshow layers and adding a folder's current contents as individual static layers (40-layer scene limit). File pickers display relative folder paths. Legacy playlists remain compatible.

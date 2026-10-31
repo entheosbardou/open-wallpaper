@@ -12,7 +12,7 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.4.5',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.4.6',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -70,7 +70,7 @@ def backup_index():
 def replace_media_refs(c,old_id,new_id):
     for row in c.execute('SELECT id,items FROM playlists').fetchall():
         items=json.loads(row['items'])
-        updated=[new_id if x==old_id else x for x in items]
+        updated=[new_id if x==old_id else x for x in items] if isinstance(items,list) else {**items,'media_ids':[new_id if x==old_id else x for x in items.get('media_ids',[])]}
         if updated!=items:c.execute('UPDATE playlists SET items=? WHERE id=?',(json.dumps(updated),row['id']))
     for row in c.execute('SELECT id,manifest FROM scenes').fetchall():
         manifest=json.loads(row['manifest']);changed=False
@@ -88,7 +88,7 @@ def reconcile_media(c,physical):
     # Exact duplicate path: prefer a referenced ID, then the earliest existing ID.
     references=set()
     for row in c.execute('SELECT items FROM playlists'):
-        references.update(json.loads(row['items']))
+        items=json.loads(row['items']);references.update(items if isinstance(items,list) else items.get('media_ids',[]))
     for row in c.execute('SELECT manifest FROM scenes'):
         references.update(x.get('media_id') for x in json.loads(row['manifest']).get('layers',[]))
     for path,duplicates in by_path.items():
@@ -190,7 +190,8 @@ class DeviceAssign(BaseModel):
     playlist_id:str|None=None
 class Playlist(BaseModel):
     name:str=Field(min_length=1,max_length=120)
-    media_ids:list[str]=Field(min_length=1,max_length=500)
+    media_ids:list[str]=Field(default_factory=list,max_length=500)
+    folder_ids:list[str]=Field(default_factory=list,max_length=100)
     interval_seconds:int=Field(default=30,ge=3,le=86400)
     shuffle:bool=False
 class BulkDelete(BaseModel):
@@ -205,7 +206,7 @@ class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.4.5'}
+def health(): return {'status':'ok','version':'0.4.6'}
 @app.get('/api/status')
 def status():
     with db() as c: return {'setup_required':c.execute('SELECT 1 FROM admin').fetchone() is None}
@@ -348,11 +349,13 @@ def delete_media(ident:str,_:None=Depends(admin)):
 
 def validate_scene(scene:Scene):
     for layer in scene.layers:
-        if layer.get('type') not in ('image','video','web','clock','playlist'):raise HTTPException(400,'Invalid layer type')
+        if layer.get('type') not in ('image','video','web','clock','playlist','folder'):raise HTTPException(400,'Invalid layer type')
         if layer['type'] in ('image','video'):
             ident=layer.get('media_id')
             with db() as c:r=c.execute('SELECT kind FROM media WHERE id=?',(ident,)).fetchone()
             if not r or r['kind']!=layer['type']:raise HTTPException(400,'Invalid media reference')
+        if layer['type']=='folder':
+            with db() as c:descendant_ids(c,[layer.get('folder_id')])
         if layer['type']=='playlist':
             with db() as c:r=c.execute('SELECT 1 FROM playlists WHERE id=?',(layer.get('playlist_id'),)).fetchone()
             if not r:raise HTTPException(400,'Invalid playlist reference')
@@ -382,23 +385,51 @@ def delete_scene(ident:str,_:None=Depends(admin)):
         c.execute('UPDATE devices SET scene_id=NULL WHERE scene_id=?',(ident,))
         c.execute('DELETE FROM scenes WHERE id=?',(ident,))
     return {'ok':True}
+def descendant_ids(c,folder_ids):
+    rows=[dict(r) for r in c.execute('SELECT id,parent_id FROM folders')]
+    known={r['id'] for r in rows}
+    if any(fid not in known for fid in folder_ids):raise HTTPException(400,'Unknown folder selection')
+    selected=set(folder_ids)
+    while True:
+        more={r['id'] for r in rows if r['parent_id'] in selected}
+        if more <= selected:break
+        selected |= more
+    return selected
+
+def resolve_items(c,items):
+    if isinstance(items,list):items={'media_ids':items,'folder_ids':[]}
+    ids=list(dict.fromkeys(items.get('media_ids',[])))
+    folder_ids=items.get('folder_ids',[])
+    if folder_ids:
+        children=descendant_ids(c,folder_ids)
+        for r in c.execute('SELECT id,folder_id FROM media ORDER BY filename COLLATE NOCASE'):
+            if r['folder_id'] in children and r['id'] not in ids:ids.append(r['id'])
+    return ids
+
+def playlist_response(c,r):
+    items=json.loads(r['items'])
+    if isinstance(items,list):items={'media_ids':items,'folder_ids':[]}
+    return {'id':r['id'],'name':r['name'],'media_ids':resolve_items(c,items),'selected_media_ids':items.get('media_ids',[]),'folder_ids':items.get('folder_ids',[]),'interval_seconds':r['interval_seconds'],'shuffle':bool(r['shuffle'])}
+
 @app.get('/api/playlists')
 def list_playlists(_:None=Depends(admin)):
-    with db() as c:return [{'id':r['id'],'name':r['name'],'media_ids':json.loads(r['items']),'interval_seconds':r['interval_seconds'],'shuffle':bool(r['shuffle'])} for r in c.execute('SELECT * FROM playlists ORDER BY name')]
+    with db() as c:return [playlist_response(c,r) for r in c.execute('SELECT * FROM playlists ORDER BY name').fetchall()]
 def validate_playlist(p:Playlist):
     with db() as c:
         found={r['id'] for r in c.execute('SELECT id FROM media WHERE id IN ('+','.join('?' for _ in p.media_ids)+')',p.media_ids)}
     if len(found)!=len(set(p.media_ids)):raise HTTPException(400,'Playlist references missing media')
+    with db() as c:descendant_ids(c,p.folder_ids)
+    if not p.media_ids and not p.folder_ids:raise HTTPException(400,'Choose files or folders')
 @app.post('/api/playlists')
 def create_playlist(p:Playlist,_:None=Depends(admin)):
     validate_playlist(p);ident=uuid4().hex
-    with db() as c:c.execute('INSERT INTO playlists VALUES(?,?,?,?,?)',(ident,p.name,json.dumps(p.media_ids),p.interval_seconds,int(p.shuffle)))
+    with db() as c:c.execute('INSERT INTO playlists VALUES(?,?,?,?,?)',(ident,p.name,json.dumps({"media_ids":p.media_ids,"folder_ids":p.folder_ids}),p.interval_seconds,int(p.shuffle)))
     return {'id':ident}
 @app.put('/api/playlists/{ident}')
 def update_playlist(ident:str,p:Playlist,_:None=Depends(admin)):
     validate_playlist(p)
     with db() as c:
-        cur=c.execute('UPDATE playlists SET name=?,items=?,interval_seconds=?,shuffle=? WHERE id=?',(p.name,json.dumps(p.media_ids),p.interval_seconds,int(p.shuffle),ident))
+        cur=c.execute('UPDATE playlists SET name=?,items=?,interval_seconds=?,shuffle=? WHERE id=?',(p.name,json.dumps({"media_ids":p.media_ids,"folder_ids":p.folder_ids}),p.interval_seconds,int(p.shuffle),ident))
         if not cur.rowcount:raise HTTPException(404)
     return {'ok':True}
 @app.delete('/api/playlists/{ident}')
@@ -484,7 +515,7 @@ def revoke(ident:str,_:None=Depends(admin)):
     return {'ok':True}
 def expanded_playlist(c,ident):
     row=c.execute('SELECT * FROM playlists WHERE id=?',(ident,)).fetchone()
-    return {'id':row['id'],'name':row['name'],'media_ids':json.loads(row['items']),'interval_seconds':row['interval_seconds'],'shuffle':bool(row['shuffle'])} if row else None
+    return playlist_response(c,row) if row else None
 
 def device_payload(c,d):
     scene_row=c.execute('SELECT manifest FROM scenes WHERE id=?',(d['scene_id'],)).fetchone() if d['scene_id'] else None
@@ -496,6 +527,10 @@ def device_payload(c,d):
             if layer.get('type')=='playlist':
                 pid=layer.get('playlist_id')
                 linked[pid]=expanded_playlist(c,pid)
+            elif layer.get('type')=='folder':
+                fid=layer.get('folder_id');pid='folder:'+str(fid)
+                linked[pid]={'id':pid,'name':'Folder','media_ids':resolve_items(c,{'folder_ids':[fid]}),'interval_seconds':max(3,int(layer.get('interval_seconds',30))),'shuffle':False}
+                layer['type']='playlist';layer['playlist_id']=pid
     ids=media_ids_for_payload({'scene':scene,'playlist':direct,'playlists':linked})
     kinds={r['id']:r['kind'] for r in c.execute('SELECT id,kind FROM media') if r['id'] in ids}
     return {'device_id':d['id'],'scene':scene,'playlist':direct,'playlists':linked,'media_types':kinds}
@@ -511,6 +546,7 @@ def media_ids_for_payload(payload):
 
 @app.get('/api/device/config')
 def config(req:Request,d:dict=Depends(device)):
+    sync_media()
     with db() as c:return device_payload(c,d)
 @app.get('/api/device/media/{ident}')
 def device_media(ident:str,req:Request,d:dict=Depends(device)):
