@@ -166,6 +166,10 @@ def schedule_media_scan():
 
 def _scan_media_worker():
     """Incremental, bounded-memory scan; never modifies existing physical files."""
+    from server.external_catalog import enabled, import_catalog
+    if enabled():
+        import_catalog(MEDIA, TYPES)
+        return
     import logging
     seen=0
     try:
@@ -221,7 +225,7 @@ def trigger_scan(u:dict=Depends(require('folders.manage'))):
 
 @app.get('/api/index/status')
 def scan_status(u:dict=Depends(require('media.view'))):
-    with db() as c:return dict(c.execute('SELECT * FROM index_state WHERE name=?',('media',)).fetchone() or {})
+    with db() as c:return dict(c.execute('SELECT * FROM index_state WHERE name=?',('external_catalog' if __import__('server.external_catalog',fromlist=['enabled']).enabled() else 'media',)).fetchone() or {})
 
 
 

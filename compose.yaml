@@ -6,6 +6,9 @@ services:
     environment:
       DATABASE_URL: "mysql://wallpaper:${MYSQL_PASSWORD}@mysql:3306/open_wallpaper"
       AUTO_SCAN: "true"
+      EXTERNAL_CATALOG_ENABLED: "${EXTERNAL_CATALOG_ENABLED:-false}"
+      EXTERNAL_CATALOG_URL: "${EXTERNAL_CATALOG_URL:-}"
+      EXTERNAL_CATALOG_MEDIA_ROOT: "${EXTERNAL_CATALOG_MEDIA_ROOT:-/app/data/media}"
       # PUBLIC_URL: "https://wallpaper.example.com"
     volumes:
       - wallpaper-data:/app/data
