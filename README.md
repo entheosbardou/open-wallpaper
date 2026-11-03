@@ -123,3 +123,11 @@ login remains available for recovery. This release supports one OIDC issuer.
 **Important:** Do not put this behind a public hostname until you have tested user isolation,
 provider configuration and your proxy. This release has automated smoke tests but has
 not undergone an independent security audit or production OIDC integration test.
+
+## v0.5.1 — Folder access controls (security preview)
+
+Administrators can configure folder-specific user permissions under **Users & access → Folder access**. Regular users have no access to folders until explicitly granted. The six permissions are `view`, `use`, `upload`, `edit`, `delete`, and `manage`. Grants inherit to subfolders; an explicit child grant overrides the inherited rights. A parent of an accessible child can appear as a navigation-only container without exposing its files. Administrators retain full access.
+
+Folder restrictions are enforced on media/folder listings, file retrieval, uploads, moves, deletion, scene and playlist creation, playlist expansion, and Android device media/config endpoints. Unauthorized direct media requests return 404. The server creates the `folder_grants` table automatically and does not delete existing media. **Back up the database before deploying.** Test access with a non-administrator account and an already paired Android device before exposing the instance publicly.
+
+**Compatibility note:** The server denies access to unfiled/root media for regular users; move such files into a folder and grant access to that folder. This release is not independently security-audited.

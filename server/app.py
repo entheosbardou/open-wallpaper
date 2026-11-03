@@ -12,7 +12,7 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.5.0',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.5.1',docs_url=None,redoc_url=None)
 
 @contextmanager
 def db():
@@ -62,6 +62,67 @@ def migrate_users():
             c.execute('UPDATE sessions SET user_id=? WHERE user_id IS NULL',(uid,))
             for table in ('scenes','playlists','devices'):c.execute(f'UPDATE {table} SET owner_id=? WHERE owner_id IS NULL',(uid,))
 migrate_users()
+
+# Folder ACL: no implicit access for ordinary users; grants are inherited downwards.
+# A child can be browsed only if its ancestor grants traversal, or via a
+# navigational ancestor returned without media permissions.
+def migrate_folder_acl():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS folder_grants(
+            folder_id TEXT NOT NULL, user_id TEXT NOT NULL,
+            can_view INTEGER NOT NULL DEFAULT 0, can_use INTEGER NOT NULL DEFAULT 0,
+            can_upload INTEGER NOT NULL DEFAULT 0, can_edit INTEGER NOT NULL DEFAULT 0,
+            can_delete INTEGER NOT NULL DEFAULT 0, can_manage INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(folder_id,user_id))""")
+migrate_folder_acl()
+
+FOLDER_RIGHTS=('view','use','upload','edit','delete','manage')
+def folder_rights(c,user,fid):
+    if user['role']=='admin':return {r:True for r in FOLDER_RIGHTS}
+    result={r:False for r in FOLDER_RIGHTS}
+    if fid is None:return result
+    chain=[];seen=set()
+    while fid:
+        if fid in seen:raise HTTPException(400,'Folder cycle')
+        seen.add(fid)
+        row=c.execute('SELECT parent_id FROM folders WHERE id=?',(fid,)).fetchone()
+        if not row:raise HTTPException(404,'Not found')
+        chain.append(fid);fid=row['parent_id']
+    for folder in reversed(chain):
+        row=c.execute('SELECT * FROM folder_grants WHERE folder_id=? AND user_id=?',(folder,user['id'])).fetchone()
+        if row:
+            for right in FOLDER_RIGHTS:result[right]=bool(row['can_'+right])
+    return result
+
+def folder_check(c,user,fid,right='view'):
+    if not folder_rights(c,user,fid)[right]:raise HTTPException(404,'Not found')
+
+def media_check(c,user,ident,right='view'):
+    row=c.execute('SELECT * FROM media WHERE id=?',(ident,)).fetchone()
+    if not row:raise HTTPException(404,'Not found')
+    if not allowed(user,'media.view') and right in ('view','use'):raise HTTPException(404,'Not found')
+    folder_check(c,user,row['folder_id'],right)
+    return row
+
+def filter_media_ids(c,user,ids,right='use'):
+    result=[]
+    for ident in ids:
+        try:media_check(c,user,ident,right);result.append(ident)
+        except HTTPException:pass
+    return result
+
+def visible_folder_ids(c,user):
+    rows=c.execute('SELECT id,parent_id FROM folders').fetchall()
+    visible={r['id'] for r in rows if folder_rights(c,user,r['id'])['view']}
+    # Parents of permitted folders are navigation-only, not accessible folders.
+    nav=set(visible)
+    for fid in list(visible):
+        while fid:
+            row=c.execute('SELECT parent_id FROM folders WHERE id=?',(fid,)).fetchone()
+            fid=row['parent_id'] if row else None
+            if fid:nav.add(fid)
+    return visible,nav
+
 with db() as c:
     if 'owner_id' not in [r[1] for r in c.execute('PRAGMA table_info(qr_invites)')]:c.execute('ALTER TABLE qr_invites ADD COLUMN owner_id TEXT')
 
@@ -294,7 +355,7 @@ class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.5.0'}
+def health(): return {'status':'ok','version':'0.5.1'}
 @app.get('/api/status')
 def status():
     with db() as c:return {'setup_required':c.execute('SELECT 1 FROM users').fetchone() is None,'oidc_enabled':bool(os.getenv('OIDC_ISSUER') and os.getenv('OIDC_CLIENT_ID'))}
@@ -363,7 +424,7 @@ def change_user(uid:str,body:UserUpdate,u:dict=Depends(require('users.manage')))
         if body.role is not None:c.execute('UPDATE users SET role=? WHERE id=?',(body.role,uid))
         if body.enabled is not None:c.execute('UPDATE users SET enabled=? WHERE id=?',(int(body.enabled),uid))
         if body.oidc_issuer is not None or body.oidc_sub is not None:
-            if not body.oidc_issuer or not body.oidc_sub or body.oidc_issuer.rstrip('/')!=os.getenv('OIDC_ISSUER','').rstrip():raise HTTPException(400,'OIDC issuer and subject required; issuer must match configured provider')
+            if not body.oidc_issuer or not body.oidc_sub or body.oidc_issuer.rstrip('/')!=os.getenv('OIDC_ISSUER','').rstrip('/'):raise HTTPException(400,'OIDC issuer and subject required; issuer must match configured provider')
             c.execute('UPDATE users SET oidc_issuer=?,oidc_sub=? WHERE id=?',(body.oidc_issuer.rstrip('/'),body.oidc_sub,uid))
         for p,v in (body.permissions or {}).items():c.execute('INSERT OR REPLACE INTO user_permissions VALUES(?,?,?)',(uid,p,int(v)))
         if body.enabled is False:c.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
@@ -399,7 +460,7 @@ def remove_share(kind:str,ident:str,recipient_id:str,u:dict=Depends(require('sha
 # OpenID Connect: authorization-code + PKCE; validated ID token via provider JWKS.
 async def oidc_metadata():
     import httpx
-    issuer=os.getenv('OIDC_ISSUER','').rstrip()
+    issuer=os.getenv('OIDC_ISSUER','').rstrip('/')
     if not issuer.startswith('https://') or not os.getenv('OIDC_CLIENT_ID'):raise HTTPException(404,'OIDC not configured with HTTPS issuer')
     async with httpx.AsyncClient(timeout=15,follow_redirects=False) as client:
         r=await client.get(issuer+'/.well-known/openid-configuration');r.raise_for_status();meta=r.json()
@@ -449,16 +510,50 @@ async def oidc_callback(req:Request,code:str='',state:str=''):
     response=login_response(uid)
     response.status_code=303;response.headers['location']='/';return response
 
+class FolderGrantInput(BaseModel):
+    user_id:str
+    view:bool=False
+    use:bool=False
+    upload:bool=False
+    edit:bool=False
+    delete:bool=False
+    manage:bool=False
+
+@app.get('/api/folders/{ident}/access')
+def folder_access(ident:str,u:dict=Depends(require('users.manage'))):
+    with db() as c:
+        folder_path(c,ident)
+        return [dict(x) for x in c.execute('SELECT * FROM folder_grants WHERE folder_id=?',(ident,))]
+
+@app.put('/api/folders/{ident}/access')
+def set_folder_access(ident:str,body:FolderGrantInput,u:dict=Depends(require('users.manage'))):
+    with db() as c:
+        folder_path(c,ident)
+        recipient=c.execute('SELECT id FROM users WHERE id=?',(body.user_id,)).fetchone()
+        if not recipient:raise HTTPException(404,'User not found')
+        rights=[int(getattr(body,r)) for r in FOLDER_RIGHTS]
+        c.execute('INSERT OR REPLACE INTO folder_grants VALUES(?,?,?,?,?,?,?,?)',(ident,body.user_id,*rights))
+    return {'ok':True}
+
+@app.delete('/api/folders/{ident}/access/{uid}')
+def delete_folder_access(ident:str,uid:str,u:dict=Depends(require('users.manage'))):
+    with db() as c:
+        folder_path(c,ident)
+        c.execute('DELETE FROM folder_grants WHERE folder_id=? AND user_id=?',(ident,uid))
+    return {'ok':True}
+
 @app.get('/api/media')
-def media_list(_:dict=Depends(require('media.view'))):
+def media_list(u:dict=Depends(require('media.view'))):
     sync_media()
-    with db() as c:return [clean_media(r) for r in c.execute('SELECT * FROM media ORDER BY name')]
+    with db() as c:return [clean_media(r) for r in c.execute('SELECT * FROM media ORDER BY name') if folder_rights(c,u,r['folder_id'])['view']]
 @app.post('/api/media')
-async def upload(file:UploadFile=File(...),folder_id:str|None=Form(None),_:dict=Depends(require('media.upload'))):
+async def upload(file:UploadFile=File(...),folder_id:str|None=Form(None),u:dict=Depends(require('media.upload'))):
     name=Path(file.filename or '').name;suffix=Path(name).suffix.lower()
     if suffix not in TYPES:raise HTTPException(400,'Unsupported file type')
     mime,kind=TYPES[suffix];ident=uuid4().hex;size=0
-    with db() as c:directory=MEDIA/folder_path(c,folder_id)
+    with db() as c:
+        folder_check(c,u,folder_id,'upload')
+        directory=MEDIA/folder_path(c,folder_id)
     directory.mkdir(parents=True,exist_ok=True);dest=unique_file(directory,name)
     try:
         with dest.open('xb') as out:
@@ -475,34 +570,39 @@ def media_file(ident:str,req:Request):
     # Device content is protected by its token, and admin by its session.
     try:
         u=admin(req)
-        if not allowed(u,'media.view'):raise HTTPException(403,'Media permission denied')
+        with db() as c:media_check(c,u,ident,'view')
     except HTTPException as exc:
         if exc.status_code!=401:raise
         d=device(req)
         with db() as c:
             payload=device_payload(c,d)
             if ident not in media_ids_for_payload(payload):raise HTTPException(404,'Media not assigned to device')
+            media_check(c,device_owner(c,d),ident,'use')
     with db() as c:row=c.execute('SELECT * FROM media WHERE id=?',(ident,)).fetchone()
     if not row:raise HTTPException(404,'Not found')
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'],headers={'Cache-Control':'private, max-age=3600'})
 @app.get('/api/folders')
-def folders(_:dict=Depends(require('media.view'))):
+def folders(u:dict=Depends(require('media.view'))):
     sync_media()
-    with db() as c:return [dict(x) for x in c.execute('SELECT * FROM folders ORDER BY name')]
+    with db() as c:
+        permitted,nav=visible_folder_ids(c,u)
+        return [{**dict(x),'navigation_only':x['id'] not in permitted} for x in c.execute('SELECT * FROM folders ORDER BY name') if x['id'] in nav]
 @app.post('/api/folders')
-def add_folder(body:FolderInput,_:dict=Depends(require('folders.manage'))):
+def add_folder(body:FolderInput,u:dict=Depends(require('folders.manage'))):
     ident=uuid4().hex;name=folder_name(body.name)
     with db() as c:
         if body.parent_id and not c.execute('SELECT 1 FROM folders WHERE id=?',(body.parent_id,)).fetchone():raise HTTPException(404,'Parent folder not found')
+        folder_check(c,u,body.parent_id,'edit')
         target=MEDIA/folder_path(c,body.parent_id)/name
         if target.exists():raise HTTPException(409,'Folder already exists')
         target.mkdir(parents=True)
         c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,name,body.parent_id))
     return {'id':ident}
 @app.put('/api/folders/{ident}')
-def rename_folder(ident:str,body:FolderInput,_:dict=Depends(require('folders.manage'))):
+def rename_folder(ident:str,body:FolderInput,u:dict=Depends(require('folders.manage'))):
     name=folder_name(body.name)
     with db() as c:
+        folder_check(c,u,ident,'edit');folder_check(c,u,body.parent_id,'edit')
         old=folder_path(c,ident);parent=folder_path(c,body.parent_id);new=parent/name
         if parent==old or old in parent.parents:raise HTTPException(400,'Folder cycle')
         if new!=old and (MEDIA/new).exists():raise HTTPException(409,'Destination folder exists')
@@ -517,8 +617,9 @@ def rename_folder(ident:str,body:FolderInput,_:dict=Depends(require('folders.man
     return {'ok':True}
 
 @app.delete('/api/folders/{ident}')
-def remove_folder(ident:str,_:dict=Depends(require('folders.manage'))):
+def remove_folder(ident:str,u:dict=Depends(require('folders.manage'))):
     with db() as c:
+        folder_check(c,u,ident,'delete')
         if c.execute('SELECT 1 FROM folders WHERE parent_id=?',(ident,)).fetchone():raise HTTPException(409,'Move or delete subfolders first')
         rel=folder_path(c,ident)
         for row in c.execute('SELECT id,filename FROM media WHERE folder_id=?',(ident,)).fetchall():
@@ -533,12 +634,14 @@ def remove_folder(ident:str,_:dict=Depends(require('folders.manage'))):
     return {'ok':True}
 
 @app.post('/api/media/move')
-def move_media(body:MoveMedia,_:dict=Depends(require('folders.manage'))):
+def move_media(body:MoveMedia,u:dict=Depends(require('folders.manage'))):
     with db() as c:
+        folder_check(c,u,body.folder_id,'edit')
         directory=MEDIA/folder_path(c,body.folder_id);directory.mkdir(parents=True,exist_ok=True)
         for ident in set(body.ids):
             row=c.execute('SELECT filename FROM media WHERE id=?',(ident,)).fetchone()
             if not row:continue
+            media_check(c,u,ident,'edit')
             src=MEDIA/row['filename']
             if src.parent==directory:
                 c.execute('UPDATE media SET folder_id=? WHERE id=?',(body.folder_id,ident));continue
@@ -549,12 +652,13 @@ def move_media(body:MoveMedia,_:dict=Depends(require('folders.manage'))):
     return {'ok':True}
 
 @app.post('/api/media/bulk-delete')
-def bulk_delete(body:BulkDelete,_:dict=Depends(require('media.delete'))):
+def bulk_delete(body:BulkDelete,u:dict=Depends(require('media.delete'))):
     removed=[]
     with db() as c:
         for ident in set(body.ids):
             row=c.execute('SELECT filename FROM media WHERE id=?',(ident,)).fetchone()
             if row:
+                media_check(c,u,ident,'delete')
                 c.execute('DELETE FROM media WHERE id=?',(ident,))
                 removed.append(row['filename'])
     with db() as c:
@@ -563,25 +667,28 @@ def bulk_delete(body:BulkDelete,_:dict=Depends(require('media.delete'))):
                 (MEDIA/name).unlink(missing_ok=True)
     return {'deleted':len(removed)}
 @app.delete('/api/media/{ident}')
-def delete_media(ident:str,_:dict=Depends(require('media.delete'))):
+def delete_media(ident:str,u:dict=Depends(require('media.delete'))):
     with db() as c:
         row=c.execute('SELECT filename FROM media WHERE id=?',(ident,)).fetchone()
         if not row:raise HTTPException(404)
+        media_check(c,u,ident,'delete')
         c.execute('DELETE FROM media WHERE id=?',(ident,))
     with db() as c:
         if not c.execute('SELECT 1 FROM media WHERE filename=?',(row['filename'],)).fetchone():
             (MEDIA/row['filename']).unlink(missing_ok=True)
     return {'ok':True}
 
-def validate_scene(scene:Scene):
+def validate_scene(scene:Scene,user):
     for layer in scene.layers:
         if layer.get('type') not in ('image','video','web','clock','playlist','folder'):raise HTTPException(400,'Invalid layer type')
         if layer['type'] in ('image','video'):
             ident=layer.get('media_id')
-            with db() as c:r=c.execute('SELECT kind FROM media WHERE id=?',(ident,)).fetchone()
+            with db() as c:
+                media_check(c,user,ident,'use')
+                r=c.execute('SELECT kind FROM media WHERE id=?',(ident,)).fetchone()
             if not r or r['kind']!=layer['type']:raise HTTPException(400,'Invalid media reference')
         if layer['type']=='folder':
-            with db() as c:descendant_ids(c,[layer.get('folder_id')])
+            with db() as c:folder_check(c,user,layer.get('folder_id'),'use')
         if layer['type']=='playlist':
             with db() as c:r=c.execute('SELECT 1 FROM playlists WHERE id=?',(layer.get('playlist_id'),)).fetchone()
             if not r:raise HTTPException(400,'Invalid playlist reference')
@@ -590,11 +697,17 @@ def validate_scene(scene:Scene):
             raise HTTPException(400,'Web layers are reserved for a sandboxed renderer in a future release')
 @app.get('/api/scenes')
 def scenes(u:dict=Depends(admin)):
-    with db() as c:return [{'id':r['id'],'name':r['name'],'manifest':json.loads(r['manifest'])} for r in visible(c,u,'scene')]
+    with db() as c:
+        result=[]
+        for r in visible(c,u,'scene'):
+            manifest=json.loads(r['manifest'])
+            manifest['layers']=[layer for layer in manifest.get('layers',[]) if layer_allowed(c,u,layer)]
+            result.append({'id':r['id'],'name':r['name'],'manifest':manifest})
+        return result
 @app.post('/api/scenes')
 def create_scene(scene:Scene,u:dict=Depends(admin)):
     ensure_create(u,'scene')
-    validate_scene(scene);ident=uuid4().hex
+    validate_scene(scene,u);ident=uuid4().hex
     with db() as c:
         for layer in scene.layers:
             if layer.get('type')=='playlist':resource_access(c,u,'playlist',layer.get('playlist_id'))
@@ -603,7 +716,7 @@ def create_scene(scene:Scene,u:dict=Depends(admin)):
     return manifest
 @app.put('/api/scenes/{ident}')
 def update_scene(ident:str,scene:Scene,u:dict=Depends(admin)):
-    validate_scene(scene)
+    validate_scene(scene,u)
     with db() as c:
         for layer in scene.layers:
             if layer.get('type')=='playlist':resource_access(c,u,'playlist',layer.get('playlist_id'))
@@ -642,29 +755,37 @@ def resolve_items(c,items):
             if r['folder_id'] in children and r['id'] not in ids:ids.append(r['id'])
     return ids
 
-def playlist_response(c,r):
+def playlist_response(c,r,user=None):
     items=json.loads(r['items'])
     if isinstance(items,list):items={'media_ids':items,'folder_ids':[]}
-    return {'id':r['id'],'name':r['name'],'media_ids':resolve_items(c,items),'selected_media_ids':items.get('media_ids',[]),'folder_ids':items.get('folder_ids',[]),'interval_seconds':r['interval_seconds'],'shuffle':bool(r['shuffle'])}
+    ids=resolve_items(c,items)
+    if user:
+        ids=filter_media_ids(c,user,ids)
+        selected=filter_media_ids(c,user,items.get('media_ids',[]))
+        selected_folders=[fid for fid in items.get('folder_ids',[]) if folder_rights(c,user,fid)['use']]
+    else:selected=items.get('media_ids',[]);selected_folders=items.get('folder_ids',[])
+    return {'id':r['id'],'name':r['name'],'media_ids':ids,'selected_media_ids':selected,'folder_ids':selected_folders,'interval_seconds':r['interval_seconds'],'shuffle':bool(r['shuffle'])}
 
 @app.get('/api/playlists')
 def list_playlists(u:dict=Depends(admin)):
-    with db() as c:return [playlist_response(c,r) for r in visible(c,u,'playlist')]
-def validate_playlist(p:Playlist):
+    with db() as c:return [playlist_response(c,r,u) for r in visible(c,u,'playlist')]
+def validate_playlist(p:Playlist,user):
     with db() as c:
         found={r['id'] for r in c.execute('SELECT id FROM media WHERE id IN ('+','.join('?' for _ in p.media_ids)+')',p.media_ids)}
     if len(found)!=len(set(p.media_ids)):raise HTTPException(400,'Playlist references missing media')
-    with db() as c:descendant_ids(c,p.folder_ids)
+    with db() as c:
+        for fid in p.folder_ids:folder_check(c,user,fid,'use')
+        for ident in p.media_ids:media_check(c,user,ident,'use')
     if not p.media_ids and not p.folder_ids:raise HTTPException(400,'Choose files or folders')
 @app.post('/api/playlists')
 def create_playlist(p:Playlist,u:dict=Depends(admin)):
     ensure_create(u,'playlist')
-    validate_playlist(p);ident=uuid4().hex
+    validate_playlist(p,u);ident=uuid4().hex
     with db() as c:c.execute('INSERT INTO playlists(id,name,items,interval_seconds,shuffle,owner_id) VALUES(?,?,?,?,?,?)',(ident,p.name,json.dumps({"media_ids":p.media_ids,"folder_ids":p.folder_ids}),p.interval_seconds,int(p.shuffle),u['id']))
     return {'id':ident}
 @app.put('/api/playlists/{ident}')
 def update_playlist(ident:str,p:Playlist,u:dict=Depends(admin)):
-    validate_playlist(p)
+    validate_playlist(p,u)
     with db() as c:
         resource_access(c,u,'playlist',ident,edit=True)
         cur=c.execute('UPDATE playlists SET name=?,items=?,interval_seconds=?,shuffle=? WHERE id=?',(p.name,json.dumps({"media_ids":p.media_ids,"folder_ids":p.folder_ids}),p.interval_seconds,int(p.shuffle),ident))
@@ -761,19 +882,41 @@ def expanded_playlist(c,ident):
     row=c.execute('SELECT * FROM playlists WHERE id=?',(ident,)).fetchone()
     return playlist_response(c,row) if row else None
 
+def device_owner(c,d):
+    row=c.execute('SELECT * FROM users WHERE id=? AND enabled=1',(d['owner_id'],)).fetchone()
+    if not row:raise HTTPException(403,'Device owner disabled or missing')
+    return dict(row)
+
+def layer_allowed(c,user,layer):
+    kind=layer.get('type')
+    if kind in ('image','video'):
+        try:media_check(c,user,layer.get('media_id'),'use');return True
+        except HTTPException:return False
+    if kind=='folder':return folder_rights(c,user,layer.get('folder_id'))['use']
+    if kind=='playlist':
+        try:resource_access(c,user,'playlist',layer.get('playlist_id'));return True
+        except HTTPException:return False
+    return True
+
 def device_payload(c,d):
     scene_row=c.execute('SELECT manifest FROM scenes WHERE id=?',(d['scene_id'],)).fetchone() if d['scene_id'] else None
+    owner=device_owner(c,d)
     scene=json.loads(scene_row['manifest']) if scene_row else None
+    if scene:scene['layers']=[x for x in scene.get('layers',[]) if layer_allowed(c,owner,x)]
     direct=expanded_playlist(c,d['playlist_id']) if d['playlist_id'] else None
+    if direct:direct['media_ids']=filter_media_ids(c,owner,direct['media_ids'])
     linked={}
     if scene:
         for layer in scene.get('layers',[]):
             if layer.get('type')=='playlist':
                 pid=layer.get('playlist_id')
+                try:resource_access(c,owner,'playlist',pid)
+                except HTTPException:continue
                 linked[pid]=expanded_playlist(c,pid)
+                if linked[pid]:linked[pid]['media_ids']=filter_media_ids(c,owner,linked[pid]['media_ids'])
             elif layer.get('type')=='folder':
                 fid=layer.get('folder_id');pid='folder:'+str(fid)
-                linked[pid]={'id':pid,'name':'Folder','media_ids':resolve_items(c,{'folder_ids':[fid]}),'interval_seconds':max(3,int(layer.get('interval_seconds',30))),'shuffle':False}
+                linked[pid]={'id':pid,'name':'Folder','media_ids':filter_media_ids(c,owner,resolve_items(c,{'folder_ids':[fid]})),'interval_seconds':max(3,int(layer.get('interval_seconds',30))),'shuffle':False}
                 layer['type']='playlist';layer['playlist_id']=pid
     ids=media_ids_for_payload({'scene':scene,'playlist':direct,'playlists':linked})
     kinds={r['id']:r['kind'] for r in c.execute('SELECT id,kind FROM media') if r['id'] in ids}
@@ -797,6 +940,7 @@ def device_media(ident:str,req:Request,d:dict=Depends(device)):
     with db() as c:
         row=c.execute('SELECT * FROM media WHERE id=?',(ident,)).fetchone()
         allowed=media_ids_for_payload(device_payload(c,d))
-    if not row or ident not in allowed:raise HTTPException(404)
+        if not row or ident not in allowed:raise HTTPException(404)
+        media_check(c,device_owner(c,d),ident,'use')
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'])
 app.mount('/',StaticFiles(directory=str(WEB),html=True),name='web')
