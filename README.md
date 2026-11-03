@@ -1,3 +1,9 @@
+# Open Wallpaper v0.6.0 (MySQL-only preview)
+
+**Start with [README-v0.6.0.md](README-v0.6.0.md).** Older instructions below describe historical releases and SQLite upgrades, which do not apply to v0.6.0.
+
+---
+
 # Open Wallpaper v0.4.0
 
 Self-hosted wallpaper server and experimental Android live wallpaper client.
