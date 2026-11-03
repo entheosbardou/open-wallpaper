@@ -1,6 +1,5 @@
-import hashlib, hmac, json, mimetypes, os, secrets, time, base64, io, shutil, urllib.parse
-import pymysql
-import threading
+import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, base64, io, shutil, urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException, Depends, Form
@@ -13,14 +12,69 @@ MEDIA=DATA/'media'; MEDIA.mkdir(exist_ok=True)
 WEB=Path(__file__).resolve().parent.parent/'web'
 MAX_BYTES=100*1024*1024
 TYPES={'.jpg':('image/jpeg','image'),'.jpeg':('image/jpeg','image'),'.png':('image/png','image'),'.webp':('image/webp','image'),'.gif':('image/gif','image'),'.mp4':('video/mp4','video'),'.webm':('video/webm','video')}
-app=FastAPI(title='Open Wallpaper Server',version='0.6.0',docs_url=None,redoc_url=None)
+app=FastAPI(title='Open Wallpaper Server',version='0.5.1',docs_url=None,redoc_url=None)
 
-# MySQL-only fresh installation. Existing SQLite databases are not migrated.
-from server.mysql_store import db, initialize_schema
-initialize_schema()
+@contextmanager
+def db():
+    con=sqlite3.connect(DATA/'app.sqlite3',timeout=10)
+    con.row_factory=sqlite3.Row
+    try: yield con; con.commit()
+    finally: con.close()
 
+def init():
+    with db() as c:
+        c.executescript('''CREATE TABLE IF NOT EXISTS admin(id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,name TEXT NOT NULL,filename TEXT NOT NULL,kind TEXT NOT NULL,mime TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS scenes(id TEXT PRIMARY KEY,name TEXT NOT NULL,manifest TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL,scene_id TEXT,created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS pairing(code_hash TEXT PRIMARY KEY,device_name TEXT NOT NULL,expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY,name TEXT NOT NULL,items TEXT NOT NULL,interval_seconds INTEGER NOT NULL,shuffle INTEGER NOT NULL); ''')
+        c.execute('CREATE TABLE IF NOT EXISTS qr_invites(token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS folders(id TEXT PRIMARY KEY,name TEXT NOT NULL,parent_id TEXT REFERENCES folders(id) ON DELETE RESTRICT)')
+        for table,column in [('media','folder_id TEXT'),('devices','playlist_id TEXT')]:
+            if column.split()[0] not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')]: c.execute(f'ALTER TABLE {table} ADD COLUMN {column}')
+init()
+
+# v0.5.0: additive migration; the original administrator retains ownership.
 PERMISSIONS=('media.view','media.upload','media.delete','folders.manage','scenes.create','playlists.create','devices.pair','devices.manage','sharing.manage','users.manage')
 DEFAULT_PERMISSIONS={'media.view','media.upload','scenes.create','playlists.create','devices.pair','sharing.manage'}
+def migrate_users():
+    backup=DATA/'app.sqlite3.before-multiuser-v050.bak'
+    if not backup.exists() and (DATA/'app.sqlite3').exists():
+        source=sqlite3.connect(DATA/'app.sqlite3');target=sqlite3.connect(backup)
+        try:source.backup(target)
+        finally:target.close();source.close()
+    with db() as c:
+        c.executescript('''CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,salt TEXT,password_hash TEXT,role TEXT NOT NULL DEFAULT 'user',enabled INTEGER NOT NULL DEFAULT 1,oidc_issuer TEXT,oidc_sub TEXT,UNIQUE(oidc_issuer,oidc_sub));
+        CREATE TABLE IF NOT EXISTS user_permissions(user_id TEXT NOT NULL,permission TEXT NOT NULL,allowed INTEGER NOT NULL,PRIMARY KEY(user_id,permission));
+        CREATE TABLE IF NOT EXISTS resource_shares(kind TEXT NOT NULL,resource_id TEXT NOT NULL,recipient_id TEXT NOT NULL,can_edit INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(kind,resource_id,recipient_id));
+        CREATE TABLE IF NOT EXISTS auth_states(state_hash TEXT PRIMARY KEY,nonce TEXT NOT NULL,verifier TEXT NOT NULL,expires INTEGER NOT NULL);''')
+        for table in ('scenes','playlists','devices'):
+            if 'owner_id' not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')]:c.execute(f'ALTER TABLE {table} ADD COLUMN owner_id TEXT')
+            if 'visibility' not in [r[1] for r in c.execute(f'PRAGMA table_info({table})')] and table!='devices':c.execute(f"ALTER TABLE {table} ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+        if 'user_id' not in [r[1] for r in c.execute('PRAGMA table_info(sessions)')]:c.execute('ALTER TABLE sessions ADD COLUMN user_id TEXT')
+        original=c.execute('SELECT * FROM admin WHERE id=1').fetchone()
+        if original:
+            user=c.execute('SELECT id FROM users WHERE username=?',(original['username'],)).fetchone()
+            uid=user['id'] if user else uuid4().hex
+            if not user:c.execute('INSERT INTO users(id,username,salt,password_hash,role) VALUES(?,?,?,?,?)',(uid,original['username'],original['salt'],original['password_hash'],'admin'))
+            c.execute('UPDATE sessions SET user_id=? WHERE user_id IS NULL',(uid,))
+            for table in ('scenes','playlists','devices'):c.execute(f'UPDATE {table} SET owner_id=? WHERE owner_id IS NULL',(uid,))
+migrate_users()
+
+# Folder ACL: no implicit access for ordinary users; grants are inherited downwards.
+# A child can be browsed only if its ancestor grants traversal, or via a
+# navigational ancestor returned without media permissions.
+def migrate_folder_acl():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS folder_grants(
+            folder_id TEXT NOT NULL, user_id TEXT NOT NULL,
+            can_view INTEGER NOT NULL DEFAULT 0, can_use INTEGER NOT NULL DEFAULT 0,
+            can_upload INTEGER NOT NULL DEFAULT 0, can_edit INTEGER NOT NULL DEFAULT 0,
+            can_delete INTEGER NOT NULL DEFAULT 0, can_manage INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(folder_id,user_id))""")
+migrate_folder_acl()
 
 FOLDER_RIGHTS=('view','use','upload','edit','delete','manage')
 def folder_rights(c,user,fid):
@@ -68,6 +122,9 @@ def visible_folder_ids(c,user):
             fid=row['parent_id'] if row else None
             if fid:nav.add(fid)
     return visible,nav
+
+with db() as c:
+    if 'owner_id' not in [r[1] for r in c.execute('PRAGMA table_info(qr_invites)')]:c.execute('ALTER TABLE qr_invites ADD COLUMN owner_id TEXT')
 
 def current_user(req:Request):
     token=req.cookies.get('session','') or bearer(req)
@@ -151,84 +208,108 @@ def unique_file(directory,name):
     while target.exists():target=directory/f'{stem} ({i}){ext}';i+=1
     return target
 
-def sync_media():
-    """Compatibility entry point: schedule a scan rather than block a request."""
-    schedule_media_scan()
-
-
-def schedule_media_scan():
-    global _scan_thread
-    with _scan_schedule_lock:
-        if _scan_thread and _scan_thread.is_alive():return
-        _scan_thread=threading.Thread(target=_scan_media_worker,daemon=True,name='media-index')
-        _scan_thread.start()
-
-
-def _scan_media_worker():
-    """Incremental, bounded-memory scan; never modifies existing physical files."""
-    from server.external_catalog import enabled, import_catalog
-    if enabled():
-        import_catalog(MEDIA, TYPES)
-        return
-    import logging
-    seen=0
+def backup_index():
+    """One-time pre-repair SQLite snapshot, created with SQLite backup API."""
+    backup=DATA/'app.sqlite3.before-media-repair-v045.bak'
+    if backup.exists():return
+    source=sqlite3.connect(DATA/'app.sqlite3')
     try:
-        with db() as c:c.execute('REPLACE INTO index_state(name,last_started,last_finished,last_error,files_seen) VALUES(?,UNIX_TIMESTAMP(),NULL,NULL,0)',('media',))
-        # Use small transactions so login and API queries remain responsive.
-        for root, dirs, files in os.walk(MEDIA,followlinks=False):
-            dirs[:]=[d for d in dirs if not d.startswith('.') and not (Path(root)/d).is_symlink()]
-            rel_dir=Path(root).relative_to(MEDIA)
-            parent=None
-            for part in rel_dir.parts:
-                with db() as c:
-                    row=c.execute('SELECT id FROM folders WHERE parent_id <=> ? AND name=? LIMIT 1',(parent,part)).fetchone()
-                    if row:parent=row['id']
-                    else:
+        with sqlite3.connect(backup) as target:source.backup(target)
+    finally:source.close()
+
+
+def replace_media_refs(c,old_id,new_id):
+    for row in c.execute('SELECT id,items FROM playlists').fetchall():
+        items=json.loads(row['items'])
+        updated=[new_id if x==old_id else x for x in items] if isinstance(items,list) else {**items,'media_ids':[new_id if x==old_id else x for x in items.get('media_ids',[])]}
+        if updated!=items:c.execute('UPDATE playlists SET items=? WHERE id=?',(json.dumps(updated),row['id']))
+    for row in c.execute('SELECT id,manifest FROM scenes').fetchall():
+        manifest=json.loads(row['manifest']);changed=False
+        for layer in manifest.get('layers',[]):
+            if layer.get('media_id')==old_id:
+                layer['media_id']=new_id;changed=True
+        if changed:c.execute('UPDATE scenes SET manifest=? WHERE id=?',(json.dumps(manifest),row['id']))
+
+
+def reconcile_media(c,physical):
+    """Never remove a physical file. Repair only unambiguous matches."""
+    rows=[dict(r) for r in c.execute('SELECT * FROM media ORDER BY rowid')]
+    by_path={}
+    for row in rows:by_path.setdefault(row['filename'],[]).append(row)
+    # Exact duplicate path: prefer a referenced ID, then the earliest existing ID.
+    references=set()
+    for row in c.execute('SELECT items FROM playlists'):
+        items=json.loads(row['items']);references.update(items if isinstance(items,list) else items.get('media_ids',[]))
+    for row in c.execute('SELECT manifest FROM scenes'):
+        references.update(x.get('media_id') for x in json.loads(row['manifest']).get('layers',[]))
+    for path,duplicates in by_path.items():
+        if len(duplicates)<2:continue
+        duplicates.sort(key=lambda r:(r['id'] not in references,rows.index(r)))
+        winner=duplicates[0]
+        for duplicate in duplicates[1:]:
+            replace_media_refs(c,duplicate['id'],winner['id'])
+            c.execute('DELETE FROM media WHERE id=?',(duplicate['id'],))
+    rows=[dict(r) for r in c.execute('SELECT * FROM media ORDER BY rowid')]
+    occupied={r['filename'] for r in rows if r['filename'] in physical}
+    missing=[r for r in rows if r['filename'] not in physical]
+    unindexed=set(physical)-occupied
+    # If exactly one real file has a given basename and every index record
+    # for that basename refers to that file or to a missing path, consolidate.
+    # Never merge when two real files share a basename.
+    names={Path(r['filename']).name for r in missing}
+    for name in names:
+        actual=[path for path in physical if Path(path).name==name]
+        if len(actual)!=1:continue
+        target=actual[0]
+        candidates=[r for r in missing if Path(r['filename']).name==name]
+        existing=[r for r in c.execute('SELECT * FROM media WHERE filename=?',(target,))]
+        combined=existing+candidates
+        if not combined:continue
+        # Keep a referenced ID when possible, otherwise the oldest row.
+        combined.sort(key=lambda r:(r['id'] not in references, next((i for i,x in enumerate(rows) if x['id']==r['id']),999999)))
+        winner=combined[0]
+        for duplicate in combined[1:]:
+            replace_media_refs(c,duplicate['id'],winner['id'])
+            c.execute('DELETE FROM media WHERE id=?',(duplicate['id'],))
+        c.execute('UPDATE media SET filename=?,folder_id=?,name=? WHERE id=?',
+                  (target,physical[target],name,winner['id']))
+        unindexed.discard(target)
+    return unindexed
+
+
+def sync_media():
+    # Serialize concurrent HTTP requests so the same file is never imported twice.
+    import threading
+    with _media_sync_lock:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            known={str(folder_path(c,r['id'])):r['id'] for r in c.execute('SELECT id FROM folders')}
+            physical={}
+            for root,dirs,files in os.walk(MEDIA,followlinks=False):
+                dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink() and not d.startswith('.')]
+                relative=Path(root).relative_to(MEDIA)
+                parent=None;walk=Path()
+                for part in relative.parts:
+                    walk=walk/part;key=str(walk)
+                    if key not in known:
                         ident=uuid4().hex
-                        c.execute('INSERT INTO folders(id,name,parent_id) VALUES(?,?,?)',(ident,part,parent))
-                        parent=ident
-            batch=[]
-            for name in files:
-                path=Path(root)/name
-                if path.is_symlink() or path.suffix.lower() not in TYPES:continue
-                rel=str(path.relative_to(MEDIA));mime,kind=TYPES[path.suffix.lower()]
-                batch.append((uuid4().hex,name,rel,kind,mime,parent))
-                if len(batch)>=250:
-                    _insert_media_batch(batch);seen+=len(batch);batch=[]
-            if batch:_insert_media_batch(batch);seen+=len(batch)
-        with db() as c:c.execute('UPDATE index_state SET last_finished=UNIX_TIMESTAMP(),files_seen=? WHERE name=?',(seen,'media'))
-    except Exception as exc:
-        logging.exception('Background media scan failed')
-        try:
-            with db() as c:c.execute('UPDATE index_state SET last_error=?,last_finished=UNIX_TIMESTAMP() WHERE name=?',(str(exc)[:2000],'media'))
-        except Exception:logging.exception('Unable to record media scan failure')
+                        c.execute('INSERT INTO folders VALUES(?,?,?)',(ident,part,parent));known[key]=ident
+                    parent=known[key]
+                for filename in files:
+                    full=Path(root)/filename
+                    if full.is_symlink() or full.suffix.lower() not in TYPES:continue
+                    physical[str(full.relative_to(MEDIA))]=parent
+            # A backup precedes any destructive metadata cleanup, but never touches media files.
+            if c.execute('SELECT 1 FROM media LIMIT 1').fetchone():backup_index()
+            unindexed=reconcile_media(c,physical)
+            for rel in sorted(unindexed):
+                mime,kind=TYPES[Path(rel).suffix.lower()]
+                c.execute('INSERT INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',
+                          (uuid4().hex,Path(rel).name,rel,kind,mime,physical[rel]))
 
 
-def _insert_media_batch(batch):
-    with db() as c:
-        for entry in batch:
-            c.execute('INSERT IGNORE INTO media(id,name,filename,kind,mime,folder_id) VALUES(?,?,?,?,?,?)',entry)
-
-
-_scan_schedule_lock=threading.Lock()
-_scan_thread=None
-
-@app.on_event('startup')
-def begin_background_scan():
-    if os.environ.get('AUTO_SCAN','true').lower() in ('true','1','yes'):
-        schedule_media_scan()
-
-@app.post('/api/index/rescan')
-def trigger_scan(u:dict=Depends(require('folders.manage'))):
-    schedule_media_scan()
-    return {'started':True}
-
-@app.get('/api/index/status')
-def scan_status(u:dict=Depends(require('media.view'))):
-    with db() as c:return dict(c.execute('SELECT * FROM index_state WHERE name=?',('external_catalog' if __import__('server.external_catalog',fromlist=['enabled']).enabled() else 'media',)).fetchone() or {})
-
-
-
+import threading
+_media_sync_lock=threading.Lock()
 
 def digest(v): return hashlib.sha256(v.encode()).hexdigest()
 def hash_password(p,s): return hashlib.scrypt(p.encode(),salt=bytes.fromhex(s),n=2**14,r=8,p=1).hex()
@@ -274,14 +355,14 @@ class Pair(BaseModel):
     code:str
 
 @app.get('/api/health')
-def health(): return {'status':'ok','version':'0.6.0'}
+def health(): return {'status':'ok','version':'0.5.1'}
 @app.get('/api/status')
 def status():
     with db() as c:return {'setup_required':c.execute('SELECT 1 FROM users').fetchone() is None,'oidc_enabled':bool(os.getenv('OIDC_ISSUER') and os.getenv('OIDC_CLIENT_ID'))}
 @app.post('/api/setup')
 def setup(body:Credentials):
     with db() as c:
-        
+        c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT 1 FROM users').fetchone():raise HTTPException(409,'Already configured')
         salt=secrets.token_hex(16);uid=uuid4().hex
         c.execute('INSERT INTO users(id,username,salt,password_hash,role) VALUES(?,?,?,?,?)',(uid,body.username,salt,hash_password(body.password,salt),'admin'))
@@ -330,7 +411,7 @@ def add_user(body:NewUser,u:dict=Depends(require('users.manage'))):
     salt=secrets.token_hex(16);uid=uuid4().hex
     try:
         with db() as c:c.execute('INSERT INTO users(id,username,salt,password_hash,role) VALUES(?,?,?,?,?)',(uid,body.username,salt,hash_password(body.password,salt),body.role))
-    except pymysql.err.IntegrityError:raise HTTPException(409,'Username already exists')
+    except sqlite3.IntegrityError:raise HTTPException(409,'Username already exists')
     return {'id':uid}
 @app.patch('/api/users/{uid}')
 def change_user(uid:str,body:UserUpdate,u:dict=Depends(require('users.manage'))):
@@ -345,7 +426,7 @@ def change_user(uid:str,body:UserUpdate,u:dict=Depends(require('users.manage')))
         if body.oidc_issuer is not None or body.oidc_sub is not None:
             if not body.oidc_issuer or not body.oidc_sub or body.oidc_issuer.rstrip('/')!=os.getenv('OIDC_ISSUER','').rstrip('/'):raise HTTPException(400,'OIDC issuer and subject required; issuer must match configured provider')
             c.execute('UPDATE users SET oidc_issuer=?,oidc_sub=? WHERE id=?',(body.oidc_issuer.rstrip('/'),body.oidc_sub,uid))
-        for p,v in (body.permissions or {}).items():c.execute('REPLACE INTO user_permissions VALUES(?,?,?)',(uid,p,int(v)))
+        for p,v in (body.permissions or {}).items():c.execute('INSERT OR REPLACE INTO user_permissions VALUES(?,?,?)',(uid,p,int(v)))
         if body.enabled is False:c.execute('DELETE FROM sessions WHERE user_id=?',(uid,))
     return {'ok':True}
 @app.get('/api/{kind}/{ident}/shares')
@@ -364,7 +445,7 @@ def set_shares(kind:str,ident:str,body:ShareInput,u:dict=Depends(require('sharin
         r=resource_access(c,u,singular,ident,edit=True)
         if r['owner_id']!=u['id'] and u['role']!='admin':raise HTTPException(403)
         if body.recipient_id!='*' and not c.execute('SELECT 1 FROM users WHERE id=? AND enabled=1',(body.recipient_id,)).fetchone():raise HTTPException(404,'User not found')
-        c.execute('REPLACE INTO resource_shares VALUES(?,?,?,?)',(singular,ident,body.recipient_id,int(body.can_edit)))
+        c.execute('INSERT OR REPLACE INTO resource_shares VALUES(?,?,?,?)',(singular,ident,body.recipient_id,int(body.can_edit)))
     return {'ok':True}
 @app.delete('/api/{kind}/{ident}/shares/{recipient_id}')
 def remove_share(kind:str,ident:str,recipient_id:str,u:dict=Depends(require('sharing.manage'))):
@@ -404,7 +485,7 @@ async def oidc_callback(req:Request,code:str='',state:str=''):
     from authlib.jose import jwt
     if not code or not state:raise HTTPException(400,'OIDC authorization failed')
     with db() as c:
-        r=c.execute('SELECT * FROM auth_states WHERE state_hash=?',(digest(state),)).fetchone()
+        c.execute('BEGIN IMMEDIATE');r=c.execute('SELECT * FROM auth_states WHERE state_hash=?',(digest(state),)).fetchone()
         if not r or r['expires']<time.time():raise HTTPException(400,'OIDC state expired')
         c.execute('DELETE FROM auth_states WHERE state_hash=?',(digest(state),))
     meta=await oidc_metadata();base=os.environ.get('PUBLIC_URL','').rstrip('/')
@@ -451,7 +532,7 @@ def set_folder_access(ident:str,body:FolderGrantInput,u:dict=Depends(require('us
         recipient=c.execute('SELECT id FROM users WHERE id=?',(body.user_id,)).fetchone()
         if not recipient:raise HTTPException(404,'User not found')
         rights=[int(getattr(body,r)) for r in FOLDER_RIGHTS]
-        c.execute('REPLACE INTO folder_grants VALUES(?,?,?,?,?,?,?,?)',(ident,body.user_id,*rights))
+        c.execute('INSERT OR REPLACE INTO folder_grants VALUES(?,?,?,?,?,?,?,?)',(ident,body.user_id,*rights))
     return {'ok':True}
 
 @app.delete('/api/folders/{ident}/access/{uid}')
@@ -462,9 +543,9 @@ def delete_folder_access(ident:str,uid:str,u:dict=Depends(require('users.manage'
     return {'ok':True}
 
 @app.get('/api/media')
-def media_list(u:dict=Depends(require('media.view')), limit:int=500, offset:int=0):
-    # Indexing runs asynchronously; requests never walk the entire filesystem.
-    with db() as c:return [clean_media(r) for r in c.execute('SELECT * FROM media ORDER BY name LIMIT ? OFFSET ?', (max(1,min(limit,2000)),max(0,offset))) if folder_rights(c,u,r['folder_id'])['view']]
+def media_list(u:dict=Depends(require('media.view'))):
+    sync_media()
+    with db() as c:return [clean_media(r) for r in c.execute('SELECT * FROM media ORDER BY name') if folder_rights(c,u,r['folder_id'])['view']]
 @app.post('/api/media')
 async def upload(file:UploadFile=File(...),folder_id:str|None=Form(None),u:dict=Depends(require('media.upload'))):
     name=Path(file.filename or '').name;suffix=Path(name).suffix.lower()
@@ -502,7 +583,7 @@ def media_file(ident:str,req:Request):
     return FileResponse(MEDIA/row['filename'],media_type=row['mime'],headers={'Cache-Control':'private, max-age=3600'})
 @app.get('/api/folders')
 def folders(u:dict=Depends(require('media.view'))):
-    # Indexing runs asynchronously; requests never walk the entire filesystem.
+    sync_media()
     with db() as c:
         permitted,nav=visible_folder_ids(c,u)
         return [{**dict(x),'navigation_only':x['id'] not in permitted} for x in c.execute('SELECT * FROM folders ORDER BY name') if x['id'] in nav]
@@ -670,7 +751,7 @@ def resolve_items(c,items):
     folder_ids=items.get('folder_ids',[])
     if folder_ids:
         children=descendant_ids(c,folder_ids)
-        for r in c.execute('SELECT id,folder_id FROM media ORDER BY filename'):
+        for r in c.execute('SELECT id,folder_id FROM media ORDER BY filename COLLATE NOCASE'):
             if r['folder_id'] in children and r['id'] not in ids:ids.append(r['id'])
     return ids
 
@@ -745,7 +826,7 @@ class QRClaim(BaseModel):
 def claim_qr_pairing(body:QRClaim):
     now=int(time.time())
     with db() as c:
-        
+        c.execute('BEGIN IMMEDIATE')
         row=c.execute('SELECT expires,owner_id FROM qr_invites WHERE token_hash=?',(digest(body.token),)).fetchone()
         if not row or row['expires']<now:raise HTTPException(404,'QR code expired or already used')
         c.execute('DELETE FROM qr_invites WHERE token_hash=?',(digest(body.token),))
@@ -770,13 +851,13 @@ def approve(body:Pair,u:dict=Depends(require('devices.pair'))):
         c.execute('INSERT INTO devices(id,name,token_hash,scene_id,created,owner_id) VALUES(?,?,?,?,?,?)',(ident,row['device_name'],digest(token),None,int(time.time()),u['id']))
         c.execute('DELETE FROM pairing WHERE code_hash=?',(digest(body.code),))
     # Device receives token through one-time polling, implemented in /api/pairing/claim.
-    with db() as c:c.execute('INSERT INTO claims VALUES(?,?,?)',(digest(body.code),token,int(time.time())+600))
+    with db() as c:c.execute('CREATE TABLE IF NOT EXISTS claims(code_hash TEXT PRIMARY KEY, token TEXT NOT NULL, expires INTEGER NOT NULL)');c.execute('INSERT INTO claims VALUES(?,?,?)',(digest(body.code),token,int(time.time())+600))
     return {'ok':True,'device_id':ident}
 @app.post('/api/pairing/claim')
 def claim(body:Pair):
     with db() as c:
         try:r=c.execute('SELECT * FROM claims WHERE code_hash=?',(digest(body.code),)).fetchone()
-        except pymysql.err.ProgrammingError:r=None
+        except sqlite3.OperationalError:r=None
         if not r or r['expires']<time.time():return {'pending':True}
         c.execute('DELETE FROM claims WHERE code_hash=?',(digest(body.code),))
     return {'pending':False,'token':r['token']}
@@ -852,7 +933,7 @@ def media_ids_for_payload(payload):
 
 @app.get('/api/device/config')
 def config(req:Request,d:dict=Depends(device)):
-    # Indexing runs asynchronously; requests never walk the entire filesystem.
+    sync_media()
     with db() as c:return device_payload(c,d)
 @app.get('/api/device/media/{ident}')
 def device_media(ident:str,req:Request,d:dict=Depends(device)):
