@@ -1,5 +1,5 @@
 data/
-*.sqlite3
+.env
 __pycache__/
 .gradle/
 **/build/

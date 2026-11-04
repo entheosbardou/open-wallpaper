@@ -1,10 +1,36 @@
 services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: open_wallpaper
+      MYSQL_USER: wallpaper
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - wallpaper-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
   wallpaper-server:
-    image: ghcr.io/REPLACE_WITH_GITHUB_OWNER/open-wallpaper:latest
+    image: ghcr.io/entheosbardou/open-wallpaper:latest
     ports:
       - "8080:8080"
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: open_wallpaper
+      DB_USER: wallpaper
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
     volumes:
       - wallpaper-data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
     restart: unless-stopped
 volumes:
   wallpaper-data:
+  wallpaper-mysql:
