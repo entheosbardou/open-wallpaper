@@ -12,7 +12,6 @@ This file records a source review, not a live health check. Statements below des
 - The server source includes local account setup/login, optional OIDC routes, roles and permissions, resource sharing, folder grants, media and folder management, scenes, playlists, device registration and pairing, and device configuration/media endpoints.
 - The dashboard is served from `web/index.html`. The Android Kotlin app supports manual pairing and QR pairing, scene/playlist sync, local media caching, and live-wallpaper playback.
 - The Android manifest currently permits cleartext HTTP. Treat that as local-network testing behavior; use HTTPS for remote access.
-- `tests/test_mysql_access.py` covers MySQL/InnoDB setup, a permission upsert, and restricted-folder visibility including direct media access. Its module fixture truncates application tables, so it requires a disposable test database.
 - The Docker publish workflow is configured to publish Linux `amd64` and `arm64` images on pushes to `main`, version tags, or manual dispatch. The Android workflow is configured to build and upload a debug APK on manual dispatch or relevant Android/workflow changes.
 
 ## Source limitations and cautions
@@ -27,7 +26,7 @@ This file records a source review, not a live health check. Statements below des
 
 ## Verification and release state
 
-- This source review inspected the server, dashboard, Android client and manifest, Docker configuration, workflow definitions, README, and MySQL access test source.
+- This source review inspected the server, dashboard, Android client and manifest, Docker configuration, workflow definitions, and README.
 - No test suite, Docker build, APK build, workflow run, live deployment, device pairing, or end-to-end playback test was performed for this status update.
 - The default Compose configuration references the published `latest` image. A local source build requires the build overlay. Source edits alone do not update or publish the image.
 - Before a release, use the repository workflows as intended, inspect their results, then verify a clean Compose install with the published image and fresh volumes in a disposable environment. Test Android pairing and playback on a device over HTTPS for remote access.

@@ -50,13 +50,13 @@
 - Preserve reverse-proxy behavior and `PUBLIC_URL` use for externally generated pairing links. Do not hardcode domains, addresses, credentials, or machine-specific paths.
 - Do not change Authentik/OIDC setup unless requested or required by an explicitly requested integration change.
 
-## Testing and verification
+## Verification
 
-- Use the existing pytest suite and its MySQL 8.4 setup for database-dependent verification. Never substitute SQLite for MySQL. Do not run destructive tests against user data or the production database.
-- The existing `tests/test_mysql_access.py` fixture truncates application tables. Run it only with an explicitly disposable test database configured; inspect the test configuration before running it.
-- Choose checks that cover the changed behavior. For authorization work, test both allowed and denied access, including direct media requests and device payloads as relevant. For API changes used by Android, verify the corresponding client behavior where possible.
-- Do not add or run unrelated tests. Report only checks that were actually run and distinguish source changes, test results, builds, and deployments.
-- Update `README.md` and focused tests when configuration, setup, API, database, or access-control behavior changes. Keep documented capabilities aligned with the current implementation.
+- Do not commit test suites, test-only workflows, pytest configuration, or other testing-only artifacts to this repository.
+- When verification is needed, use temporary local checks or disposable MySQL 8.4 resources outside the committed project files. Never substitute SQLite for MySQL or run destructive checks against user data or production.
+- Choose checks that cover the changed behavior. For authorization work, verify allowed and denied access, including direct media requests and device payloads as relevant. For API changes used by Android, verify corresponding client behavior where possible.
+- Report only checks that were actually run and distinguish source changes, verification results, builds, and deployments.
+- Keep `README.md` aligned with current setup and capabilities. Do not add test files when updating documentation or behavior.
 
 ## Working approach
 
