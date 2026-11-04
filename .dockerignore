@@ -4,6 +4,5 @@ android
 tests
 *.zip
 __pycache__
-*.sqlite3
 data
 .pytest_cache
