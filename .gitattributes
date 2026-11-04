@@ -1,2 +1,18 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep documentation and instructions using LF
+*.md text eol=lf
+AGENTS.md text eol=lf
+
+# Linux and Docker files
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
