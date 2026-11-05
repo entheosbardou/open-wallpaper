@@ -53,9 +53,10 @@ environment:
   OIDC_CLIENT_ID: your-client-id
   OIDC_CLIENT_SECRET: your-client-secret
   OIDC_AUTO_PROVISION: "1"
+  OIDC_ADMIN_GROUPS: open-wallpaper-admins
 ```
 
-Register `https://live-wallpaper.example.com/api/oidc/callback` as the provider's exact redirect URI. The issuer must match its discovery document issuer, and OIDC endpoints must use HTTPS. The authorization-code flow uses PKCE, server-side state and nonce, provider JWKS validation, and issuer/audience checks. `OIDC_AUTO_PROVISION=1` creates regular-user accounts; otherwise, an administrator must pre-link accounts. Local administrator login remains available for recovery.
+Register `https://live-wallpaper.example.com/api/oidc/callback` as the provider's exact redirect URI. The issuer must match its discovery document issuer, and OIDC endpoints must use HTTPS. The authorization-code flow uses PKCE, server-side state and nonce, provider JWKS validation, and issuer/audience checks. `OIDC_AUTO_PROVISION=1` creates accounts using the OIDC `preferred_username` claim (falling back to the email name); existing auto-generated OIDC usernames are updated on the next sign-in when the name is available and unused. `OIDC_ADMIN_GROUPS` is a comma-separated list of OIDC `groups` claim values that grant app admin role; the default is `open-wallpaper-admins`. Configure Authentik to include the `groups` claim in the ID token. Group membership grants admin but does not automatically revoke an existing admin role when membership changes. Otherwise, an administrator must pre-link accounts. Local administrator login remains available for recovery.
 
 ## Media library
 

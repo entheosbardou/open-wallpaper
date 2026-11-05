@@ -500,15 +500,31 @@ async def oidc_callback(req:Request,code:str='',state:str=''):
     claims=jwt.decode(token['id_token'],jwks,claims_options={'iss':{'essential':True,'value':meta['issuer']},'aud':{'essential':True,'value':os.environ['OIDC_CLIENT_ID']},'nonce':{'essential':True,'value':r['nonce']},'exp':{'essential':True},'iat':{'essential':True},'sub':{'essential':True}})
     claims.validate(leeway=30)
     issuer=str(claims['iss']);sub=str(claims['sub'])
+    # Authentik's profile scope provides preferred_username and group names.
+    # Keep the subject as the immutable identity key; username is display/login.
+    display_name=str(claims.get('preferred_username') or claims.get('email','').split('@')[0] or '').strip()
+    if not display_name:display_name='oidc_'+hashlib.sha256((issuer+sub).encode()).hexdigest()[:16]
+    admin_groups={g.strip() for g in os.getenv('OIDC_ADMIN_GROUPS','open-wallpaper-admins').split(',') if g.strip()}
+    claim_groups=claims.get('groups',[])
+    if isinstance(claim_groups,str):claim_groups=[claim_groups]
+    is_oidc_admin=bool(admin_groups.intersection(str(g) for g in claim_groups if isinstance(g,(str,int))))
     with db() as c:
         c.execute('SELECT * FROM users WHERE oidc_issuer=%s AND oidc_sub=%s',(issuer,sub));user=c.fetchone()
         if not user:
             if os.getenv('OIDC_AUTO_PROVISION','0')!='1':raise HTTPException(403,'OIDC account not provisioned; ask an administrator')
-            username='oidc_'+hashlib.sha256((issuer+sub).encode()).hexdigest()[:16]
-            uid=uuid4().hex;c.execute('INSERT INTO users(id,username,role,oidc_issuer,oidc_sub) VALUES(%s,%s,%s,%s,%s)',(uid,username,'user',issuer,sub))
+            # Avoid taking over an existing local account with the same name.
+            c.execute('SELECT id FROM users WHERE username=%s',(display_name,));collision=c.fetchone()
+            if collision:display_name='oidc_'+hashlib.sha256((issuer+sub).encode()).hexdigest()[:16]
+            uid=uuid4().hex;c.execute('INSERT INTO users(id,username,role,oidc_issuer,oidc_sub) VALUES(%s,%s,%s,%s,%s)',(uid,display_name,'admin' if is_oidc_admin else 'user',issuer,sub))
         else:
             if not user['enabled']:raise HTTPException(403,'Account disabled')
             uid=user['id']
+            updates=[];values=[]
+            if user['username'].startswith('oidc_') and user['username']!=display_name:
+                c.execute('SELECT id FROM users WHERE username=%s AND id<>%s',(display_name,uid))
+                if not c.fetchone():updates.append('username=%s');values.append(display_name)
+            if is_oidc_admin and user['role']!='admin':updates.append('role=%s');values.append('admin')
+            if updates:c.execute('UPDATE users SET '+','.join(updates)+' WHERE id=%s',(*values,uid))
     response=login_response(uid)
     response.status_code=303;response.headers['location']='/';return response
 
