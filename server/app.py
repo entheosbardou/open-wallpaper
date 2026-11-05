@@ -523,7 +523,8 @@ async def oidc_callback(req:Request,code:str='',state:str=''):
             if user['username'].startswith('oidc_') and user['username']!=display_name:
                 c.execute('SELECT id FROM users WHERE username=%s AND id<>%s',(display_name,uid))
                 if not c.fetchone():updates.append('username=%s');values.append(display_name)
-            if is_oidc_admin and user['role']!='admin':updates.append('role=%s');values.append('admin')
+            oidc_role='admin' if is_oidc_admin else 'user'
+            if user['role']!=oidc_role:updates.append('role=%s');values.append(oidc_role)
             if updates:c.execute('UPDATE users SET '+','.join(updates)+' WHERE id=%s',(*values,uid))
     response=login_response(uid)
     response.status_code=303;response.headers['location']='/';return response
