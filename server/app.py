@@ -695,6 +695,31 @@ def change_user(uid:str,body:UserUpdate,u:dict=Depends(require('users.manage')))
         for p,v in (body.permissions or {}).items():c.execute('INSERT INTO user_permissions VALUES(%s,%s,%s) ON DUPLICATE KEY UPDATE allowed=VALUES(allowed)',(uid,p,int(v)))
         if body.enabled is False:c.execute('DELETE FROM sessions WHERE user_id=%s',(uid,))
     return {'ok':True}
+@app.delete('/api/users/{uid}')
+def delete_user(uid:str,u:dict=Depends(require('users.manage'))):
+    if uid==u['id']:raise HTTPException(400,'Cannot delete your own account')
+    with db() as c:
+        c.execute('SELECT id FROM users WHERE id=%s',(uid,))
+        if not c.fetchone():raise HTTPException(404)
+        # Keep the user's content and paired devices available to the administrator
+        # performing the deletion, while removing account-specific access and credentials.
+        c.execute('DELETE FROM resource_shares WHERE kind=%s AND resource_id IN (SELECT id FROM scenes WHERE owner_id=%s)',('scene',uid))
+        c.execute('DELETE FROM resource_shares WHERE kind=%s AND resource_id IN (SELECT id FROM playlists WHERE owner_id=%s)',('playlist',uid))
+        c.execute('UPDATE scenes SET owner_id=%s WHERE owner_id=%s',(u['id'],uid))
+        c.execute('UPDATE playlists SET owner_id=%s WHERE owner_id=%s',(u['id'],uid))
+        c.execute('UPDATE devices SET owner_id=%s WHERE owner_id=%s',(u['id'],uid))
+        c.execute('DELETE FROM sessions WHERE user_id=%s',(uid,))
+        c.execute('DELETE FROM user_permissions WHERE user_id=%s',(uid,))
+        c.execute('DELETE FROM folder_grants WHERE user_id=%s',(uid,))
+        c.execute('DELETE FROM resource_shares WHERE recipient_id=%s',(uid,))
+        c.execute('DELETE FROM qr_invites WHERE owner_id=%s',(uid,))
+        c.execute('DELETE FROM gallery_user_credentials WHERE user_id=%s',(uid,))
+        c.execute('DELETE FROM users WHERE id=%s',(uid,))
+    with _gallery_auth_lock:
+        _gallery_authorized_cache.pop(uid,None)
+    with threading.Lock():
+        for key in [key for key in _gallery_user_media_cache if key[0]==uid]:_gallery_user_media_cache.pop(key,None)
+    return {'ok':True}
 @app.get('/api/{kind}/{ident}/shares')
 def list_shares(kind:str,ident:str,u:dict=Depends(admin)):
     if kind not in ('scenes','playlists'):raise HTTPException(404)
