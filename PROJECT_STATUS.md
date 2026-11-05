@@ -12,6 +12,7 @@
 
 - The dashboard groups Gallery media by collection path and category. The library folder picker opens child menus on hover and selects a collection on click; scene and playlist pickers retain expandable folders. Gallery collection and category choices remain read-only. The catalog loads 250 items per page, so later items appear after **Load more Gallery media**. This is a local source change; no image was published or live deployment performed.
 - Scene and playlist media pickers provide search, image/video filtering, name sorting, and select-visible controls. Scenes can add selected media as layers; playlists include selected media. These dashboard changes are local source only.
+- Gallery collection and category branches in both pickers can select all accessible items across catalog pages, up to the existing 500 Gallery item device limit. Playlist selection adds those file IDs to the current edit; scene selection creates a saved slideshow playlist and adds it as a layer. The selection is a snapshot of current items.
 
 The original source-review snapshot below had only a date, without time or timezone. Later timestamped entries record subsequent deployment and verification evidence. Each entry describes its own observation time, not continuous health.
 
