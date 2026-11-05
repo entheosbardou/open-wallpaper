@@ -71,7 +71,7 @@ When a user signs in through OIDC, Open Wallpaper stores that user's encrypted r
 
 Gallery-backed items use provider-qualified IDs and are read-only in Open Wallpaper. The Gallery mount is never indexed, uploaded to, moved, or deleted by Open Wallpaper. The integration uses Gallery's API and does not connect to Gallery's MySQL database. Open Wallpaper creates two additive tables, `gallery_user_credentials` and `gallery_device_grants` (including the last-known denied file IDs), on application startup; existing user, device, scene, playlist, and media rows are not transformed. Back up the Open Wallpaper database before enabling the integration on an existing installation.
 
-The dashboard shows Gallery items under their Gallery collection paths in the library folder selector and the scene and playlist media pickers. Gallery collections are read-only. The catalog loads 250 items at a time; use **Load more Gallery media** to reveal collections and items in later pages. Uploads still go to Open Wallpaper's local media library.
+The dashboard shows Gallery items under nested, initially collapsed Gallery collections in the library folder picker and the scene and playlist media pickers. Gallery collections are read-only. The catalog loads 250 items at a time; use **Load more Gallery media** to reveal collections and items in later pages. Uploads still go to Open Wallpaper's local media library.
 
 ## Media library
 
