@@ -1,5 +1,10 @@
 # Codex instructions for Open Wallpaper
 
+## Temporary session instructions
+
+- Before development work in this repository, read `current-changes.md` when it exists. Treat it as temporary working context for the active development initiative/session: record current scope, decisions, clarifications, open questions, and constraints, including work contained entirely in this repository. Update it as the user and development work clarify or change the initiative. It is not permanent policy; follow the latest user direction if there is a conflict. Do not move temporary decisions into this file unless the user asks for a standing instruction.
+- Keep `current-changes.md` focused on current scope, decisions, open questions, and implementation constraints. Remove or revise stale items when the initiative changes.
+
 ## Project scope
 
 - This repository contains a self-hosted live-wallpaper server, web dashboard, and experimental Android wallpaper client. Keep work focused on these components and their shared APIs.
