@@ -1,3 +1,3 @@
 # Current changes — Open Wallpaper
 
-Temporary working context for the active development session in this repository only. Record repository-owned work here as it arises; keep durable status in `PROJECT_STATUS.md`.
+- Dashboard collection-first Gallery browsing depends on Gallery `/api/external/collections` and collection-filtered `/api/external/media`. Deploy the matching Gallery endpoint before this Open Wallpaper source.
