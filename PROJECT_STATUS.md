@@ -1,5 +1,9 @@
 # Project status
 
+## 2026-11-05 — Gallery category discovery in Open Wallpaper source
+
+- Open Wallpaper now reads category names from the Gallery collection response and exposes category folders before fetching images. Category selection requests a category-filtered catalog page. This requires Gallery to add a `categories` map to `/api/external/collections` and honor `category` on `/api/external/media`; those Gallery API changes are outside this repository. No deployment or live validation was performed for this source change.
+
 ## 2026-11-05 — Gallery collection loading in source
 
 - The dashboard now fetches accessible Gallery collection names before image data and fetches paged images when a collection is opened. This source change depends on matching Gallery API changes in the Gallery repository; neither repository was deployed.
