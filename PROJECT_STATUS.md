@@ -2,7 +2,7 @@
 
 ## 2026-11-05 — Gallery collection loading in source
 
-- The dashboard now fetches accessible Gallery collection names before image data and fetches paged images when a collection is opened. This source change depends on matching Gallery API changes in the Gallery repository; neither repository was deployed.
+- The dashboard now fetches accessible Gallery collection names before image data and fetches paged images when a collection is opened. The matching Gallery API was deployed. The user confirmed the collection-first flow works in Open Wallpaper; the Open Wallpaper deployment method and artifact were not independently recorded here.
 
 ## 2026-11-05 — Gallery collection browsing in source
 
