@@ -1,5 +1,9 @@
 # Project status
 
+## 2026-11-05 — Gallery collection browsing in source
+
+- The dashboard now groups loaded Gallery media by its Gallery collection path in the library selector and scene/playlist pickers. Gallery collection choices remain read-only. The catalog still loads 250 items per page, so collections on later pages appear after **Load more Gallery media**. This is a local source change; no image was published or live deployment performed.
+
 The original source-review snapshot below had only a date, without time or timezone. Later timestamped entries record subsequent deployment and verification evidence. Each entry describes its own observation time, not continuous health.
 
 ## 2026-11-04 23:20 MST — Optional Gallery integration connected
