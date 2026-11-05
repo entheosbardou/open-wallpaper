@@ -1,8 +1,12 @@
 # Project status
 
+## 2026-11-05 — Gallery collection loading in source
+
+- The dashboard now fetches accessible Gallery collection names before image data and fetches paged images when a collection is opened. This source change depends on matching Gallery API changes in the Gallery repository; neither repository was deployed.
+
 ## 2026-11-05 — Gallery collection browsing in source
 
-- The dashboard groups loaded Gallery media by its Gallery collection path and category. Hovering over a collection in the library picker expands its children; clicking its name selects it. The selected path expands when the picker is rebuilt. Gallery collection and category choices remain read-only. The catalog loads 250 items per page, so folders on later pages appear after **Load more Gallery media**. This is a local source change; no image was published or live deployment performed.
+- The dashboard now groups loaded Gallery media by its Gallery collection path and category in nested, initially collapsed library and scene/playlist pickers. Gallery collection and category choices remain read-only. The catalog still loads 250 items per page, so folders on later pages appear after **Load more Gallery media**. This is a local source change; no image was published or live deployment performed.
 
 The original source-review snapshot below had only a date, without time or timezone. Later timestamped entries record subsequent deployment and verification evidence. Each entry describes its own observation time, not continuous health.
 

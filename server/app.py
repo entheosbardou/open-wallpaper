@@ -447,11 +447,17 @@ def gallery_request(method,path,identity_token=None,grant_token=None,body=None,p
     except HTTPException:raise
     except Exception as exc:raise HTTPException(503,'Gallery is temporarily unavailable') from exc
 
-def gallery_catalog_page(user,after=0,limit=250):
+def gallery_catalog_page(user,after=0,limit=250,collection=None):
     identity,_,_=gallery_oidc_identity(user)
-    page=gallery_request('GET','/api/external/media',identity_token=identity,params={'after':max(0,int(after)),'limit':max(1,min(250,int(limit)))})
-    gallery_user_media_cache_put(user['id'],page.get('items',[]),replace=(int(after)==0))
+    params={'after':max(0,int(after)),'limit':max(1,min(250,int(limit)))}
+    if collection is not None:params['collection']=collection
+    page=gallery_request('GET','/api/external/media',identity_token=identity,params=params)
+    gallery_user_media_cache_put(user['id'],page.get('items',[]),replace=(int(after)==0 and collection is None))
     return page
+
+def gallery_collection_list(user):
+    identity,_,_=gallery_oidc_identity(user)
+    return gallery_request('GET','/api/external/collections',identity_token=identity)
 
 def gallery_path(root,relative_path):
     if not isinstance(relative_path,str) or not relative_path or relative_path.startswith(('/','\\')):
@@ -870,10 +876,13 @@ def media_list(u:dict=Depends(require('media.view'))):
     with db() as c:
         c.execute('SELECT * FROM media ORDER BY name')
         return [clean_media(r) for r in c.fetchall() if folder_rights(c,u,r['folder_id'])['view']]
+@app.get('/api/gallery/collections')
+def gallery_collections_list(u:dict=Depends(require('media.view'))):
+    return gallery_collection_list(u)
 @app.get('/api/gallery/media')
-def gallery_media_list(after:int=0,limit:int=250,u:dict=Depends(require('media.view'))):
+def gallery_media_list(after:int=0,limit:int=250,collection:str|None=None,u:dict=Depends(require('media.view'))):
     if after<0:raise HTTPException(400,'Catalog cursor must be non-negative')
-    page=gallery_catalog_page(u,after,limit)
+    page=gallery_catalog_page(u,after,limit,collection)
     return {'items':[record for record in (gallery_media_record(item) for item in page.get('items',[])) if record],'next_after':page.get('next_after')}
 @app.get('/api/gallery/media/{file_id}/preview')
 def gallery_media_preview(file_id:int,u:dict=Depends(require('media.view'))):
