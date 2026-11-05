@@ -420,8 +420,8 @@ def change_user(uid:str,body:UserUpdate,u:dict=Depends(require('users.manage')))
         if body.role is not None:c.execute('UPDATE users SET role=%s WHERE id=%s',(body.role,uid))
         if body.enabled is not None:c.execute('UPDATE users SET enabled=%s WHERE id=%s',(int(body.enabled),uid))
         if body.oidc_issuer is not None or body.oidc_sub is not None:
-            if not body.oidc_issuer or not body.oidc_sub or body.oidc_issuer.rstrip('/')!=os.getenv('OIDC_ISSUER','').rstrip('/'):raise HTTPException(400,'OIDC issuer and subject required; issuer must match configured provider')
-            c.execute('UPDATE users SET oidc_issuer=%s,oidc_sub=%s WHERE id=%s',(body.oidc_issuer.rstrip('/'),body.oidc_sub,uid))
+            if not body.oidc_issuer or not body.oidc_sub or body.oidc_issuer!=os.getenv('OIDC_ISSUER',''):raise HTTPException(400,'OIDC issuer and subject required; issuer must match configured provider')
+            c.execute('UPDATE users SET oidc_issuer=%s,oidc_sub=%s WHERE id=%s',(body.oidc_issuer,body.oidc_sub,uid))
         for p,v in (body.permissions or {}).items():c.execute('INSERT INTO user_permissions VALUES(%s,%s,%s) ON DUPLICATE KEY UPDATE allowed=VALUES(allowed)',(uid,p,int(v)))
         if body.enabled is False:c.execute('DELETE FROM sessions WHERE user_id=%s',(uid,))
     return {'ok':True}
@@ -459,7 +459,9 @@ def remove_share(kind:str,ident:str,recipient_id:str,u:dict=Depends(require('sha
 # OpenID Connect: authorization-code + PKCE; validated ID token via provider JWKS.
 async def oidc_metadata():
     import httpx
-    issuer=os.getenv('OIDC_ISSUER','').rstrip('/')
+    # OIDC issuer identifiers are exact values. In particular, Authentik
+    # includes a trailing slash in its issuer URL and discovery metadata.
+    issuer=os.getenv('OIDC_ISSUER','')
     if not issuer.startswith('https://') or not os.getenv('OIDC_CLIENT_ID'):raise HTTPException(404,'OIDC not configured with HTTPS issuer')
     async with httpx.AsyncClient(timeout=15,follow_redirects=False) as client:
         r=await client.get(issuer+'/.well-known/openid-configuration');r.raise_for_status();meta=r.json()
