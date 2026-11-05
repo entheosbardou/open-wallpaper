@@ -773,7 +773,7 @@ async def oidc_start(req:Request):
         c.execute('INSERT INTO auth_states VALUES(%s,%s,%s,%s)',(digest(state),nonce,verifier,int(time.time())+600))
     base=os.environ.get('PUBLIC_URL','').rstrip('/')
     if not base.startswith('https://') and os.getenv('OIDC_ALLOW_HTTP')!='1':raise HTTPException(400,'OIDC requires HTTPS PUBLIC_URL')
-    scope='openid profile email'+(' offline_access' if gallery_enabled() else '')
+    scope='openid profile email'+(' gallery_roles offline_access' if gallery_enabled() else '')
     params={'client_id':os.environ['OIDC_CLIENT_ID'],'response_type':'code','redirect_uri':base+'/api/oidc/callback','scope':scope,'state':state,'nonce':nonce,'code_challenge':create_s256_code_challenge(verifier),'code_challenge_method':'S256'}
     return RedirectResponse(meta['authorization_endpoint']+'?'+urllib.parse.urlencode(params))
 @app.get('/api/oidc/callback')
