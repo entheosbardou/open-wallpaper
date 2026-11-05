@@ -59,7 +59,7 @@ class Wallpaper:WallpaperService(){
   }
   private fun setupVideo(){val layers=resolvedLayers();var id:String?=null;for(layer in layers){if(layer.optString("type")=="video"){id=layer.optString("media_id");break}}
    if(id==videoId)return;player?.release();player=null;videoId=id
-   if(id!=null)try{val file=File(filesDir,"media/$id");if(file.exists()){player=MediaPlayer().apply{setDataSource(file.absolutePath);setSurface(surfaceHolder.surface);isLooping=true;prepare();if(visible)start()}}}catch(_:Exception){player?.release();player=null}
+   if(id!=null)try{val file=Server.cacheFile(this@Wallpaper,id);if(file.exists()){player=MediaPlayer().apply{setDataSource(file.absolutePath);setSurface(surfaceHolder.surface);isLooping=true;prepare();if(visible)start()}}}catch(_:Exception){player?.release();player=null}
   }
   private fun draw(){if(!surfaceHolder.surface.isValid)return
    // A video scene uses the video surface directly; do not overwrite its frames with Canvas.
@@ -69,7 +69,7 @@ class Wallpaper:WallpaperService(){
     if(layers.isEmpty()){paint.color=Color.WHITE;paint.textSize=42f;c.drawText("Open Wallpaper: assign and sync a scene",30f,c.height/2f,paint);return}
     val sorted=layers
     for(layer in sorted){when(layer.optString("type")){
-     "image"->{val file=File(filesDir,"media/"+layer.optString("media_id"));if(!file.exists())continue
+     "image"->{val file=Server.cacheFile(this@Wallpaper,layer.optString("media_id"));if(!file.exists())continue
       val bitmap=BitmapFactory.decodeFile(file.absolutePath)?:continue
       try{val scale=maxOf(c.width.toFloat()/bitmap.width,c.height.toFloat()/bitmap.height);val w=bitmap.width*scale;val h=bitmap.height*scale;paint.alpha=(layer.optDouble("opacity",1.0).coerceIn(0.0,1.0)*255).toInt();c.drawBitmap(bitmap,null,RectF((c.width-w)/2,(c.height-h)/2,(c.width+w)/2,(c.height+h)/2),paint)}finally{bitmap.recycle()}
      }

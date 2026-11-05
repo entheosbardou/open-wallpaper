@@ -24,6 +24,11 @@ class MainActivity:Activity(){
  private var pairingCode=""
  private var waiting=false
  private val CAMERA_REQUEST=4242
+ private fun cachedGalleryMessage():String? {
+  val cached=Server.cachedConfig(this)?:return null
+  return when{cached.optBoolean("gallery_notice")->"Some Gallery media is unavailable; playback continues.";cached.optBoolean("gallery_outage")->"Gallery is unavailable; cached media continues and new Gallery downloads are paused.";else->null}
+ }
+ override fun onResume(){super.onResume();cachedGalleryMessage()?.let{if(::status.isInitialized)status.text=it}}
  override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState)
   val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,36,32,24);setBackgroundColor(Color.rgb(14,22,37))}
   fun label(t:String,size:Float=16f)=TextView(this).apply{text=t;textSize=size;setTextColor(Color.WHITE);setPadding(0,8,0,8)}
@@ -42,7 +47,7 @@ class MainActivity:Activity(){
   })
   layout.addView(code);layout.addView(status)
   layout.addView(button("2. Check pairing approval") {if(pairingCode.isNotEmpty())poll() else status.text="Request a pairing code first."})
-  layout.addView(button("3. Sync assigned scene") {runAsync{val result=Server.sync(this);main.post{status.text=if(result.isNull("scene") && result.isNull("playlist"))"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard." else "Wallpaper synced and cached."}}})
+  layout.addView(button("3. Sync assigned scene") {runAsync{val result=Server.sync(this);main.post{status.text=when{result.optBoolean("gallery_notice")->"Wallpaper synced. Some Gallery media is unavailable; the rest continues playing.";result.optBoolean("gallery_outage")->"Gallery is unavailable. Cached media continues playing; new Gallery downloads are paused.";result.isNull("scene")&&result.isNull("playlist")->"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard.";else->"Wallpaper synced and cached."}}}})
   layout.addView(button("4. Set live wallpaper") {startActivity(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,android.content.ComponentName(this,Wallpaper::class.java)))})
   layout.addView(label("Tip: use the server's LAN IP, not localhost. HTTP is intended for trusted LANs only; use HTTPS for remote access.",13f))
   setContentView(ScrollView(this).apply{addView(layout)})

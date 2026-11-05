@@ -24,13 +24,13 @@ Self-hosted wallpaper server and experimental Android live wallpaper client. Ope
 
 The Compose stack creates a MySQL database named `open_wallpaper` and persists it in the `wallpaper-mysql` volume. Application media is stored in `wallpaper-data`. Back up both volumes before changing or removing them. `docker compose down -v` deletes the database and media volumes.
 
-**This is a clean installation. Existing SQLite data will not carry over. No database import, conversion, or migration is provided.** Media files placed under `/app/data/media` are indexed by the new server, but scenes, playlists, user accounts, sharing, permissions, and paired-device records must be recreated.
+**This is a clean installation. Existing SQLite data will not carry over. No SQLite import or conversion is provided.** Media files placed under `/app/data/media` are indexed by the new server, but scenes, playlists, user accounts, sharing, permissions, and paired-device records must be recreated.
 
 ## Configuration
 
 Database settings are provided by Compose using `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. The defaults in `compose.yaml` connect the application to the MySQL service. Set the two passwords in `.env`; Compose refuses to start when they are missing.
 
-Optional application variables include `PUBLIC_URL` for external pairing links and the existing OIDC settings below. OIDC behavior and provider setup are unchanged.
+Optional application variables include `PUBLIC_URL` for external pairing links and the existing OIDC settings below. The Gallery integration is separately enabled with a Compose overlay.
 
 ## Accounts and access
 
@@ -57,6 +57,19 @@ environment:
 ```
 
 Register `https://live-wallpaper.example.com/api/oidc/callback` as the provider's exact redirect URI. The issuer must match its discovery document issuer, and OIDC endpoints must use HTTPS. The authorization-code flow uses PKCE, server-side state and nonce, provider JWKS validation, and issuer/audience checks. `OIDC_AUTO_PROVISION=1` creates accounts using the OIDC `preferred_username` claim (falling back to the email name); existing auto-generated OIDC usernames are updated on the next sign-in when the name is available and unused. `OIDC_ADMIN_GROUPS` is a comma-separated list of OIDC `groups` claim values that control app admin role; the default is `open-wallpaper-admins`. On each OIDC sign-in, membership grants admin and absence from the configured groups demotes the account to regular user. Configure Authentik to include the `groups` claim in the ID token. Otherwise, an administrator must pre-link accounts. Local administrator login remains available for recovery.
+
+## Optional Gallery media
+
+Gallery integration is disabled unless the `compose.gallery.yaml` overlay is used. It does not change the behavior or storage of Open Wallpaper's local media.
+
+1. In `.env`, set `GALLERY_API_URL` to Gallery's HTTPS origin, `GALLERY_CLIENT_INSTANCE` to a unique stable ID for this Open Wallpaper installation, and `GALLERY_MEDIA_SOURCE` to the host directory whose paths mirror Gallery's `relative_path` values. Also set the OIDC variables and `PUBLIC_URL`.
+2. Use the same OIDC client ID and secret in Open Wallpaper and Gallery's external-media configuration. The identity provider must issue refresh tokens and include Gallery's `gallery_groups` claim in refreshed ID tokens. Open Wallpaper requests `offline_access` only when the Gallery overlay is enabled.
+3. Generate a Fernet key (for example, `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) and set it as `GALLERY_TOKEN_ENCRYPTION_KEY`. Keep this key stable and private; Open Wallpaper encrypts Gallery refresh tokens and device grants in its MySQL database with it. Losing or changing the key makes those stored credentials unreadable and requires users to sign in again and reassign Gallery media.
+4. Start the stack with `docker compose -f compose.yaml -f compose.gallery.yaml up -d` (add `-f compose.build.yaml` when building from this checkout). The Gallery files are mounted read-only at `/app/data/external/gallery`, separately from `/app/data/media`.
+
+When a user signs in through OIDC, Open Wallpaper stores that user's encrypted refresh token. Assigning a scene or playlist containing Gallery items creates a separate Gallery grant for the paired device. If the assigned scene or playlist later changes, the grant is refreshed at the next device check-in. The device receives only its Open Wallpaper device token. Gallery media is rechecked when the device syncs; items Gallery denies are omitted individually and the remaining scene or playlist continues. Confirmed denials remain excluded through Gallery outages and server restarts. If Gallery is unavailable, the device keeps other assigned Gallery references and uses cached files, while new Gallery downloads fail; local media can still sync. Reconnect the device after an outage to refresh its assignment and authorization. A device grant is limited to 500 Gallery files.
+
+Gallery-backed items use provider-qualified IDs and are read-only in Open Wallpaper. The Gallery mount is never indexed, uploaded to, moved, or deleted by Open Wallpaper. The integration uses Gallery's API and does not connect to Gallery's MySQL database. Open Wallpaper creates two additive tables, `gallery_user_credentials` and `gallery_device_grants` (including the last-known denied file IDs), on application startup; existing user, device, scene, playlist, and media rows are not transformed. Back up the Open Wallpaper database before enabling the integration on an existing installation.
 
 ## Media library
 
