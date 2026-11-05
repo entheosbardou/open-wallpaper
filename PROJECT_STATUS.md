@@ -1,8 +1,13 @@
 # Project status
 
-Updated: 2026-11-04 (date only; time and timezone were not recorded with this repository snapshot).
+The original source-review snapshot below had only a date, without time or timezone. Later timestamped entries record subsequent deployment and verification evidence. Each entry describes its own observation time, not continuous health.
 
-This file records a source review, not a live health check. Statements below describe the checked-out source and repository documentation as of the update date. They do not establish that a deployment, workflow, or device has been tested or is currently healthy.
+## 2026-11-04 23:20 MST — Optional Gallery integration connected
+
+- Current source revision `f90e467` is on `main` and `origin/main`. The user reports the Android APK workflow passed, a new Docker image was published and deployed, and Gallery media is now visible in Open Wallpaper. The exact APK run and deployed image digest were not independently recorded here.
+- The `live-wallpaper` Portainer stack on `linux-docker` was configured with Gallery's HTTPS API URL, the shared Authentik issuer/client, a stable client instance ID, and a private Fernet key. The NAS wallpaper root is mounted read-only at `/app/data/external/gallery`, separate from local media. The stack file was backed up as `docker-compose.yml.pre-gallery-20261104-224211.bak` on `linux-docker`. A one-time check showed HTTP 200 from `/api/status`, `gallery_enabled: true`, and a readable mount with `RW=false`.
+- Authentik initially issued no refresh token. After its provider enabled the Refresh token grant and `offline_access` mapping, a fresh sign-in stored one encrypted Gallery credential in Open Wallpaper MySQL. The catalog client was corrected in this repository to send a refreshed signed ID token, which Gallery accepts. A direct signed request from the container returned HTTP 200 with an item; the user later confirmed Gallery media appears in the dashboard.
+- The integration uses additive `gallery_user_credentials` and `gallery_device_grants` MySQL tables, provider-qualified `gallery:<file-id>` IDs, and a separate read-only external mount. Local media remains in its existing storage. Device assignment/grant creation, permission revocation, outage caching, and Android playback remain to be verified end to end. `current-changes.md` is reset for the next session and remains untracked.
 
 ## Implemented in source
 
