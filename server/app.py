@@ -502,44 +502,77 @@ def assigned_gallery_ids(c,scene_id=None,playlist_id=None):
             if file_id is not None:ids.append(file_id)
     return list(dict.fromkeys(ids))
 
+def gallery_grant_entries(device_id):
+    stored=gallery_device_grant(device_id)
+    if not stored:return []
+    try:
+        value=json.loads(stored)
+        if isinstance(value,list) and all(isinstance(entry,dict) for entry in value):return value
+    except (TypeError,ValueError):pass
+    return [{'device_id':device_id,'token':stored,'file_ids':None}]
+
+def gallery_revoke_entries(user,entries):
+    if not entries:return
+    try:identity,_,_=gallery_oidc_identity(user)
+    except HTTPException:return
+    for entry in entries:
+        try:gallery_request('POST','/api/external/grants/revoke',identity_token=identity,body={'grant_token':entry['token']})
+        except HTTPException:pass
+
 def gallery_create_device_grant(user,device_id,file_ids):
     identity,refresh,_=gallery_oidc_identity(user)
-    if not file_ids:gallery_discard_device_grant(device_id);return {'authorized_file_ids':[],'denied_file_ids':[]}
-    if len(file_ids)>500:raise HTTPException(400,'A device assignment can contain at most 500 Gallery items')
+    previous=gallery_grant_entries(device_id)
+    if not file_ids:
+        gallery_revoke_entries(user,previous)
+        gallery_discard_device_grant(device_id)
+        return {'authorized_file_ids':[],'denied_file_ids':[]}
     _,instance,_,_=gallery_settings()
-    result=gallery_request('POST','/api/external/grants',identity_token=identity,body={'client_instance':instance,'device_id':device_id,'file_ids':file_ids,'refresh_token':refresh})
-    grant=result.get('grant_token')
-    if not isinstance(grant,str) or len(grant)<32:raise HTTPException(502,'Gallery did not return a device grant')
-    rotated_refresh=result.get('refresh_token')
-    if isinstance(rotated_refresh,str) and rotated_refresh:store_gallery_refresh(user['id'],rotated_refresh)
-    prior_denials=gallery_device_denials(device_id)
-    store_gallery_device_grant(device_id,grant,set(result.get('denied_file_ids',[]))|prior_denials)
-    return result
+    ids=list(dict.fromkeys(int(value) for value in file_ids))
+    entries=[];approved=[];denied=[]
+    try:
+        for index in range(0,len(ids),500):
+            chunk=ids[index:index+500]
+            grant_device=f'{device_id}:{secrets.token_hex(6)}'
+            result=gallery_request('POST','/api/external/grants',identity_token=identity,body={'client_instance':instance,'device_id':grant_device,'file_ids':chunk,'refresh_token':refresh})
+            grant=result.get('grant_token')
+            if not isinstance(grant,str) or len(grant)<32:raise HTTPException(502,'Gallery did not return a device grant')
+            entries.append({'device_id':grant_device,'token':grant,'file_ids':chunk})
+            refresh=result.get('refresh_token') or refresh
+            store_gallery_refresh(user['id'],refresh)
+            approved.extend(result.get('authorized_file_ids',[]))
+            denied.extend(result.get('denied_file_ids',[]))
+        store_gallery_device_grant(device_id,json.dumps(entries),denied)
+    except Exception:
+        gallery_revoke_entries(user,entries)
+        raise
+    gallery_revoke_entries(user,previous)
+    return {'authorized_file_ids':approved,'denied_file_ids':denied}
 
 def gallery_authorize_device(device_id,file_ids,details=False):
     if not file_ids:return {}
-    _,instance,_,_=gallery_settings();grant=gallery_device_grant(device_id)
-    if not grant:
-        result={file_id:{'status':'grant_unavailable','media':None} for file_id in file_ids}
-        return result if details else {file_id:None for file_id in file_ids}
-    try:
-        response=gallery_request('POST','/api/external/grants/authorize',grant_token=grant,body={'client_instance':instance,'device_id':device_id,'file_ids':file_ids})
-    except HTTPException as exc:
-        if exc.status_code in (401,403,404):
-            result={file_id:{'status':'grant_unavailable','media':None} for file_id in file_ids}
-            return result if details else {file_id:None for file_id in file_ids}
-        raise
+    _,instance,_,_=gallery_settings()
+    entries=gallery_grant_entries(device_id)
     by_id={}
-    for item in response.get('items',[]):
-        try:file_id=int(item.get('file_id'))
-        except (TypeError,ValueError):continue
-        status=str(item.get('status') or 'denied')
-        media=item.get('media') if item.get('status')=='allowed' else None
-        if media:
-            record=gallery_media_record(media)
-            by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
-        else:by_id[file_id]={'status':status,'media':None}
-    result={file_id:by_id.get(file_id,{'status':'denied','media':None}) for file_id in file_ids}
+    for entry in entries:
+        assigned=set(entry['file_ids']) if entry.get('file_ids') is not None else None
+        wanted=[file_id for file_id in file_ids if assigned is None or file_id in assigned]
+        for index in range(0,len(wanted),500):
+            chunk=wanted[index:index+500]
+            try:response=gallery_request('POST','/api/external/grants/authorize',grant_token=entry['token'],body={'client_instance':instance,'device_id':entry['device_id'],'file_ids':chunk})
+            except HTTPException as exc:
+                if exc.status_code not in (401,403,404):raise
+                for file_id in chunk:by_id[file_id]={'status':'grant_unavailable','media':None}
+                continue
+            for item in response.get('items',[]):
+                try:file_id=int(item.get('file_id'))
+                except (TypeError,ValueError):continue
+                status=str(item.get('status') or 'denied')
+                media=item.get('media') if status=='allowed' else None
+                if media:
+                    record=gallery_media_record(media)
+                    by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
+                else:by_id[file_id]={'status':status,'media':None}
+    result={file_id:by_id.get(file_id,{'status':'not_assigned','media':None}) for file_id in file_ids}
     return result if details else {file_id:item['media'] for file_id,item in result.items()}
 
 def gallery_cache_replace(device_id,decisions,enabled=True):
@@ -585,15 +618,8 @@ def gallery_user_media_cache_get(user_id,file_id):
         return value[1]
 
 def gallery_revoke_device_grant(user,device_id):
-    grant=gallery_device_grant(device_id)
-    if not grant:return
-    try:
-        identity,_,_=gallery_oidc_identity(user)
-        gallery_request('POST','/api/external/grants/revoke',identity_token=identity,body={'grant_token':grant})
-    except HTTPException:
-        pass
-    finally:
-        gallery_discard_device_grant(device_id)
+    gallery_revoke_entries(user,gallery_grant_entries(device_id))
+    gallery_discard_device_grant(device_id)
 
 class Credentials(BaseModel):
     username:str=Field(min_length=3,max_length=60)
@@ -607,7 +633,7 @@ class DeviceAssign(BaseModel):
     playlist_id:str|None=None
 class Playlist(BaseModel):
     name:str=Field(min_length=1,max_length=120)
-    media_ids:list[str]=Field(default_factory=list,max_length=500)
+    media_ids:list[str]=Field(default_factory=list)
     folder_ids:list[str]=Field(default_factory=list,max_length=100)
     interval_seconds:int=Field(default=30,ge=3,le=86400)
     shuffle:bool=False
@@ -1256,7 +1282,6 @@ def assign(ident:str,body:DeviceAssign,u:dict=Depends(admin)):
         owner=device_owner(c,device_row)
         external_ids=assigned_gallery_ids(c,body.scene_id,body.playlist_id)
         if external_ids and not gallery_enabled():raise HTTPException(503,'Gallery media is not configured on this Open Wallpaper server')
-        if len(external_ids)>500:raise HTTPException(400,'A device assignment can contain at most 500 Gallery items')
         c.execute('UPDATE devices SET scene_id=%s,playlist_id=%s WHERE id=%s',(body.scene_id,body.playlist_id,ident))
         if not c.rowcount:raise HTTPException(404,'Device not found')
     try:
@@ -1326,23 +1351,21 @@ def device_payload(c,d,skip_gallery=False):
         except Exception:prior_denials=set()
     elif external:
         file_ids=list(dict.fromkeys(external.values()))
-        if len(file_ids)>500:gallery_outage=True
-        else:
-            try:
+        try:
+            decisions=gallery_authorize_device(d['id'],file_ids,details=True)
+            if any(item['status'] in ('not_assigned','grant_unavailable') for item in decisions.values()):
+                refreshed=gallery_create_device_grant(owner,d['id'],file_ids)
                 decisions=gallery_authorize_device(d['id'],file_ids,details=True)
                 if any(item['status'] in ('not_assigned','grant_unavailable') for item in decisions.values()):
-                    refreshed=gallery_create_device_grant(owner,d['id'],file_ids)
-                    decisions=gallery_authorize_device(d['id'],file_ids,details=True)
-                    if any(item['status'] in ('not_assigned','grant_unavailable') for item in decisions.values()):
-                        raise HTTPException(503,'Gallery did not confirm the device grant')
-                    approved={int(value) for value in refreshed.get('authorized_file_ids',[])}
-                    for file_id,item in decisions.items():
-                        if item.get('status')=='allowed' and file_id in approved:item['newly_granted']=True
-                gallery_media={file_id:item['media'] for file_id,item in decisions.items() if item.get('status')=='allowed' and item.get('media')}
-                newly_denied={file_id for file_id,item in decisions.items() if item.get('status')=='denied'}
-                add_gallery_device_denials(d['id'],newly_denied)
-            except Exception:
-                gallery_media={};gallery_outage=True;decisions={}
+                    raise HTTPException(503,'Gallery did not confirm the device grant')
+                approved={int(value) for value in refreshed.get('authorized_file_ids',[])}
+                for file_id,item in decisions.items():
+                    if item.get('status')=='allowed' and file_id in approved:item['newly_granted']=True
+            gallery_media={file_id:item['media'] for file_id,item in decisions.items() if item.get('status')=='allowed' and item.get('media')}
+            newly_denied={file_id for file_id,item in decisions.items() if item.get('status')=='denied'}
+            add_gallery_device_denials(d['id'],newly_denied)
+        except Exception:
+            gallery_media={};gallery_outage=True;decisions={}
     if external and gallery_outage and not skip_gallery:
         try:prior_denials=gallery_device_denials(d['id'])
         except Exception:prior_denials=set()
