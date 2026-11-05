@@ -448,8 +448,8 @@ def gallery_request(method,path,identity_token=None,grant_token=None,body=None,p
     except Exception as exc:raise HTTPException(503,'Gallery is temporarily unavailable') from exc
 
 def gallery_catalog_page(user,after=0,limit=250):
-    access=gallery_access_token(user)
-    page=gallery_request('GET','/api/external/media',identity_token=access,params={'after':max(0,int(after)),'limit':max(1,min(250,int(limit)))})
+    identity,_,_=gallery_oidc_identity(user)
+    page=gallery_request('GET','/api/external/media',identity_token=identity,params={'after':max(0,int(after)),'limit':max(1,min(250,int(limit)))})
     gallery_user_media_cache_put(user['id'],page.get('items',[]),replace=(int(after)==0))
     return page
 
