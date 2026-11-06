@@ -1,5 +1,9 @@
 # Project status
 
+## 2026-11-05 19:06 MST — Gallery playlist tablet sync confirmed
+
+- The user confirmed that the tablet successfully synced the Gallery playlist after the Gallery batch lookup and the paired Open Wallpaper change were deployed. Open Wallpaper checks assigned IDs through Gallery's collection/category authorization endpoint in batches of up to 500 and serves approved files from `GALLERY_MEDIA_ROOT`. This is user-reported end-to-end success; the exact deployed Open Wallpaper image digest and individual denied-file behavior were not independently checked here.
+
 ## 2026-11-05 — Gallery batch lookup in source
 
 - Device authorization now sends up to 500 assigned file IDs in one request to Gallery's new `/api/external/media/resolve` endpoint. Gallery returns current collection/category permission decisions and relative paths; Open Wallpaper continues to serve approved bytes from `GALLERY_MEDIA_ROOT`. The paired Gallery API source change is required before this Open Wallpaper revision can be deployed. Neither source change has been deployed or tablet tested.
