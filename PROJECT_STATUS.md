@@ -1,5 +1,10 @@
 # Project status
 
+## 2026-11-05 — Dashboard responsiveness in source
+
+- The media grid initially renders 150 matching items and offers a Show more control for additional loaded items. Thumbnails load lazily, videos do not preload, and library search redraws after a short pause. Selecting visible still applies to the full filtered result set.
+- Initial data loads and Gallery catalog updates redraw scene and playlist pickers only when their tabs are open. Picker filtering uses an ID lookup map and avoids repeated scans of all media for each item. JavaScript syntax and diff checks passed; browser performance and live deployment were not measured.
+
 ## 2026-11-05 — Library browsing layout in source
 
 - The dashboard opens the library in Unsorted and displays media inside a bounded, independently scrolling grid. Gallery pagination stays inside that grid. Grid redraws retain its scroll position, while choosing another folder starts at the top. This is a local source change; no deployment or browser validation was performed.
