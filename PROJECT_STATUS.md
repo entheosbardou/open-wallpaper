@@ -1,5 +1,9 @@
 # Project status
 
+## 2026-11-05 — Dashboard sign-in responsiveness in source
+
+- After session verification, the dashboard now opens before loading the media library. Gallery collection discovery runs after the local library renders, so a slow Gallery request no longer holds the initial view. This improves perceived sign-in time; the underlying media index and OIDC requests can still take time. This is a local source change, not a deployment or measured live latency fix.
+
 ## 2026-11-05 — Gallery category discovery in Open Wallpaper source
 
 - Open Wallpaper now reads category names from the Gallery collection response and exposes category folders before fetching images. Category selection requests a category-filtered catalog page. This requires Gallery to add a `categories` map to `/api/external/collections` and honor `category` on `/api/external/media`; those Gallery API changes are outside this repository. No deployment or live validation was performed for this source change.
