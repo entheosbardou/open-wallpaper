@@ -389,7 +389,7 @@ def gallery_device_denials(device_id):
 
 def store_gallery_device_denials(device_id,file_ids):
     denied=json.dumps(sorted(set(int(value) for value in file_ids)))
-    with db() as c:c.execute('UPDATE gallery_device_grants SET denied_file_ids=%s,updated=%s WHERE device_id=%s',(denied,int(time.time()),device_id))
+    with db() as c:c.execute('INSERT INTO gallery_device_grants(device_id,grant_token_encrypted,denied_file_ids,updated) VALUES(%s,%s,%s,%s) ON DUPLICATE KEY UPDATE denied_file_ids=VALUES(denied_file_ids),updated=VALUES(updated)',(device_id,gallery_encrypt(''),denied,int(time.time())))
 
 def add_gallery_device_denials(device_id,file_ids):
     current=gallery_device_denials(device_id)
@@ -1336,7 +1336,7 @@ def device_payload(c,d,skip_gallery=False):
             decisions=gallery_authorize_device(owner,file_ids,details=True)
             gallery_media={file_id:item['media'] for file_id,item in decisions.items() if item.get('status')=='allowed' and item.get('media')}
             newly_denied={file_id for file_id,item in decisions.items() if item.get('status')=='denied'}
-            add_gallery_device_denials(d['id'],newly_denied)
+            store_gallery_device_denials(d['id'],newly_denied)
         except Exception:
             gallery_media={};gallery_outage=True;decisions={}
     if external and gallery_outage and not skip_gallery:
