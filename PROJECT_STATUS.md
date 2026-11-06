@@ -1,5 +1,10 @@
 # Project status
 
+## 2026-11-05 — Gallery tablet delivery fix in source
+
+- The live tablet had 25 assigned Gallery images and a readable `GALLERY_MEDIA_ROOT` mount, but Gallery returned HTTP 401 for its stored device grant (`Gallery identity needs to be refreshed by the user`). The owner's refreshed Gallery catalog request returned the assigned image and its relative path, and that file was present on the mount.
+- Device configuration and media requests now use the owner's refreshed Gallery identity to check each assigned file through `/api/external/media`. Open Wallpaper serves approved bytes from `GALLERY_MEDIA_ROOT`. This is a local source change; it has not been built, deployed, or verified on the tablet.
+
 ## 2026-11-05 — Dashboard sign-in responsiveness in source
 
 - After session verification, the dashboard now opens before loading the media library. Gallery collection discovery runs after the local library renders, so a slow Gallery request no longer holds the initial view. This improves perceived sign-in time; the underlying media index and OIDC requests can still take time. This is a local source change, not a deployment or measured live latency fix.

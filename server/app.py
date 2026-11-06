@@ -548,31 +548,17 @@ def gallery_create_device_grant(user,device_id,file_ids):
     gallery_revoke_entries(user,previous)
     return {'authorized_file_ids':approved,'denied_file_ids':denied}
 
-def gallery_authorize_device(device_id,file_ids,details=False):
+def gallery_authorize_device(user,file_ids,details=False):
     if not file_ids:return {}
-    _,instance,_,_=gallery_settings()
-    entries=gallery_grant_entries(device_id)
+    identity,_,_=gallery_oidc_identity(user)
     by_id={}
-    for entry in entries:
-        assigned=set(entry['file_ids']) if entry.get('file_ids') is not None else None
-        wanted=[file_id for file_id in file_ids if assigned is None or file_id in assigned]
-        for index in range(0,len(wanted),500):
-            chunk=wanted[index:index+500]
-            try:response=gallery_request('POST','/api/external/grants/authorize',grant_token=entry['token'],body={'client_instance':instance,'device_id':entry['device_id'],'file_ids':chunk})
-            except HTTPException as exc:
-                if exc.status_code not in (401,403,404):raise
-                for file_id in chunk:by_id[file_id]={'status':'grant_unavailable','media':None}
-                continue
-            for item in response.get('items',[]):
-                try:file_id=int(item.get('file_id'))
-                except (TypeError,ValueError):continue
-                status=str(item.get('status') or 'denied')
-                media=item.get('media') if status=='allowed' else None
-                if media:
-                    record=gallery_media_record(media)
-                    by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
-                else:by_id[file_id]={'status':status,'media':None}
-    result={file_id:by_id.get(file_id,{'status':'not_assigned','media':None}) for file_id in file_ids}
+    for file_id in dict.fromkeys(file_ids):
+        page=gallery_request('GET','/api/external/media',identity_token=identity,params={'after':file_id-1,'limit':1})
+        items=page.get('items',[])
+        media=items[0] if items and int(items[0].get('file_id',0))==file_id else None
+        record=gallery_media_record(media) if media else None
+        by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
+    result={file_id:by_id[file_id] for file_id in file_ids}
     return result if details else {file_id:item['media'] for file_id,item in result.items()}
 
 def gallery_cache_replace(device_id,decisions,enabled=True):
@@ -1202,8 +1188,10 @@ def devices(u:dict=Depends(admin)):
         item={k:row[k] for k in ('id','name','scene_id','playlist_id','created')}
         if gallery_enabled():
             try:
-                with db() as c:ids=assigned_gallery_ids(c,row.get('scene_id'),row.get('playlist_id'))
-                decisions=gallery_authorize_device(row['id'],ids) if ids else {}
+                with db() as c:
+                    ids=assigned_gallery_ids(c,row.get('scene_id'),row.get('playlist_id'))
+                    owner=device_owner(c,row) if ids else None
+                decisions=gallery_authorize_device(owner,ids) if ids else {}
                 item['gallery_unavailable_count']=sum(1 for file_id in ids if not decisions.get(file_id))
             except HTTPException:item['gallery_unavailable_count']=None
         result.append(item)
@@ -1278,20 +1266,13 @@ def assign(ident:str,body:DeviceAssign,u:dict=Depends(admin)):
             c.execute('SELECT 1 FROM playlists WHERE id=%s',(body.playlist_id,))
             if not c.fetchone():raise HTTPException(404,'Playlist not found')
         if body.scene_id and body.playlist_id:raise HTTPException(400,'Choose scene or playlist')
-        previous=(device_row.get('scene_id'),device_row.get('playlist_id'))
-        owner=device_owner(c,device_row)
         external_ids=assigned_gallery_ids(c,body.scene_id,body.playlist_id)
         if external_ids and not gallery_enabled():raise HTTPException(503,'Gallery media is not configured on this Open Wallpaper server')
         c.execute('UPDATE devices SET scene_id=%s,playlist_id=%s WHERE id=%s',(body.scene_id,body.playlist_id,ident))
         if not c.rowcount:raise HTTPException(404,'Device not found')
-    try:
-        result=gallery_create_device_grant(owner,ident,external_ids) if external_ids else {'denied_file_ids':[]}
-    except Exception:
-        with db() as c:c.execute('UPDATE devices SET scene_id=%s,playlist_id=%s WHERE id=%s',(previous[0],previous[1],ident))
-        raise
     gallery_cache_replace(ident,{},enabled=False)
     if not external_ids:gallery_discard_device_grant(ident)
-    return {'ok':True,'gallery_denied_count':len(result.get('denied_file_ids',[]))}
+    return {'ok':True,'gallery_denied_count':0}
 @app.delete('/api/devices/{ident}')
 def revoke(ident:str,u:dict=Depends(admin)):
     with db() as c:
@@ -1352,15 +1333,7 @@ def device_payload(c,d,skip_gallery=False):
     elif external:
         file_ids=list(dict.fromkeys(external.values()))
         try:
-            decisions=gallery_authorize_device(d['id'],file_ids,details=True)
-            if any(item['status'] in ('not_assigned','grant_unavailable') for item in decisions.values()):
-                refreshed=gallery_create_device_grant(owner,d['id'],file_ids)
-                decisions=gallery_authorize_device(d['id'],file_ids,details=True)
-                if any(item['status'] in ('not_assigned','grant_unavailable') for item in decisions.values()):
-                    raise HTTPException(503,'Gallery did not confirm the device grant')
-                approved={int(value) for value in refreshed.get('authorized_file_ids',[])}
-                for file_id,item in decisions.items():
-                    if item.get('status')=='allowed' and file_id in approved:item['newly_granted']=True
+            decisions=gallery_authorize_device(owner,file_ids,details=True)
             gallery_media={file_id:item['media'] for file_id,item in decisions.items() if item.get('status')=='allowed' and item.get('media')}
             newly_denied={file_id for file_id,item in decisions.items() if item.get('status')=='denied'}
             add_gallery_device_denials(d['id'],newly_denied)
@@ -1376,7 +1349,7 @@ def device_payload(c,d,skip_gallery=False):
     if skip_gallery:denied={ident for ident,file_id in external.items() if file_id in prior_denials}
     elif gallery_outage:denied={ident for ident,file_id in external.items() if file_id in prior_denials}
     else:
-        denied={ident for ident,file_id in external.items() if not gallery_media.get(file_id) or (file_id in prior_denials and not decisions.get(file_id,{}).get('newly_granted'))}
+        denied={ident for ident,file_id in external.items() if not gallery_media.get(file_id)}
     scene_unavailable=set()
     if not gallery_outage and scene:
         for layer in scene.get('layers',[]):
@@ -1422,7 +1395,8 @@ def device_media(ident:str,req:Request,d:dict=Depends(device)):
             if ident not in media_ids_for_payload(payload):raise HTTPException(404,'Media is not assigned to this device')
         item=gallery_cache_get(d['id'],file_id)
         if not item:
-            decisions=gallery_authorize_device(d['id'],[file_id]);item=decisions.get(file_id)
+            with db() as c:owner=device_owner(c,d)
+            decisions=gallery_authorize_device(owner,[file_id]);item=decisions.get(file_id)
             if item:gallery_cache_put(d['id'],file_id,item)
         if not item:raise HTTPException(404,'Gallery media is no longer authorized')
         if int(item.get('file_id',0))!=file_id:raise HTTPException(404,'Gallery media is no longer authorized')
