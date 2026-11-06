@@ -1,5 +1,13 @@
 # Project status
 
+## 2026-11-05 — Gallery batch lookup in source
+
+- Device authorization now sends up to 500 assigned file IDs in one request to Gallery's new `/api/external/media/resolve` endpoint. Gallery returns current collection/category permission decisions and relative paths; Open Wallpaper continues to serve approved bytes from `GALLERY_MEDIA_ROOT`. The paired Gallery API source change is required before this Open Wallpaper revision can be deployed. Neither source change has been deployed or tablet tested.
+
+## 2026-11-05 — Gallery playlist sync timeout follow-up
+
+- The first catalog-based device authorization implementation made one Gallery HTTP request per assigned file. A 25-image playlist could exceed the Android client's 20-second configuration read timeout. Nearby file IDs are now checked in bounded catalog pages of at most 250 IDs, preserving individual allow/deny decisions. The reported tablet timeout has not yet been retested with this source change deployed.
+
 ## 2026-11-05 — Gallery tablet delivery fix in source
 
 - The live tablet had 25 assigned Gallery images and a readable `GALLERY_MEDIA_ROOT` mount, but Gallery returned HTTP 401 for its stored device grant (`Gallery identity needs to be refreshed by the user`). The owner's refreshed Gallery catalog request returned the assigned image and its relative path, and that file was present on the mount.

@@ -552,12 +552,19 @@ def gallery_authorize_device(user,file_ids,details=False):
     if not file_ids:return {}
     identity,_,_=gallery_oidc_identity(user)
     by_id={}
-    for file_id in dict.fromkeys(file_ids):
-        page=gallery_request('GET','/api/external/media',identity_token=identity,params={'after':file_id-1,'limit':1})
-        items=page.get('items',[])
-        media=items[0] if items and int(items[0].get('file_id',0))==file_id else None
-        record=gallery_media_record(media) if media else None
-        by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
+    ids=list(dict.fromkeys(file_ids))
+    for start in range(0,len(ids),500):
+        group=ids[start:start+500]
+        response=gallery_request('POST','/api/external/media/resolve',identity_token=identity,body={'file_ids':group})
+        items=response.get('items',[])
+        if not isinstance(items,list) or len(items)!=len(group):raise HTTPException(502,'Gallery returned an incomplete media decision')
+        for item in items:
+            try:file_id=int(item['file_id'])
+            except (KeyError,TypeError,ValueError):raise HTTPException(502,'Gallery returned an invalid media decision')
+            if file_id not in group or file_id in by_id:raise HTTPException(502,'Gallery returned an unexpected media decision')
+            media=item.get('media') if item.get('status')=='allowed' else None
+            record=gallery_media_record(media) if media else None
+            by_id[file_id]={'status':'allowed' if record else 'denied','media':dict(media,kind=record['kind'],mime=record['mime']) if record else None}
     result={file_id:by_id[file_id] for file_id in file_ids}
     return result if details else {file_id:item['media'] for file_id,item in result.items()}
 

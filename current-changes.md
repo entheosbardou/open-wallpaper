@@ -1,6 +1,6 @@
 # Current changes — Open Wallpaper
 
-- Device Gallery authorization now checks each assigned file through the owner's refreshed Gallery catalog identity. The API supplies current permission and relative path; Open Wallpaper serves bytes from `GALLERY_MEDIA_ROOT`. The prior Gallery device grants failed with HTTP 401 after refresh-token rotation. This source change still needs deployment and tablet verification.
+- Device Gallery authorization sends up to 500 assigned IDs per request to Gallery's new `/api/external/media/resolve` endpoint with the owner's refreshed identity. Gallery applies collection and category permissions and supplies current relative paths; Open Wallpaper serves approved bytes from `GALLERY_MEDIA_ROOT`. The prior Gallery device grants failed with HTTP 401 after refresh-token rotation. Gallery must deploy the new endpoint before Open Wallpaper; both changes still need deployment and tablet verification.
 
 - Category folders are populated from Gallery `/api/external/collections` response field `categories`, mapping each collection key to an array of accessible category names. Category selection calls `/api/external/media` with both `collection` and `category`. Gallery API implementation and deployment are outside this repository.
 - Align the scene and playlist media pickers with the local media library's search, type filter, sort, and select-visible controls. Scene selection adds media as layers; playlist selection includes media in the saved playlist.
