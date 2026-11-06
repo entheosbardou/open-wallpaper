@@ -1,9 +1,9 @@
 # Project status
 
-## 2026-11-05 — Dashboard responsiveness in source
+## 2026-11-05 — Screen switching responsiveness in source
 
-- The media grid initially renders 150 matching items and offers a Show more control for additional loaded items. Thumbnails load lazily, videos do not preload, and library search redraws after a short pause. Selecting visible still applies to the full filtered result set.
-- Initial data loads and Gallery catalog updates redraw scene and playlist pickers only when their tabs are open. Picker filtering uses an ID lookup map and avoids repeated scans of all media for each item. JavaScript syntax and diff checks passed; browser performance and live deployment were not measured.
+- Scene and playlist picker trees now remain mounted while switching tabs. They rebuild when media or Gallery data changes, or when an edit explicitly requires it. This preserves picker scroll and expansion state during ordinary navigation.
+- Initial data loads and Gallery catalog updates redraw scene and playlist pickers only when their tabs are open. Picker selection uses sets, and filtering uses an ID lookup map. The earlier 150-item library limit and search delay were removed after the user clarified that switching screens was the main issue. JavaScript syntax and diff checks passed; browser performance and live deployment were not measured.
 
 ## 2026-11-05 — Library browsing layout in source
 
