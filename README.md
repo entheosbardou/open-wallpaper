@@ -75,6 +75,8 @@ The dashboard shows Gallery items under nested Gallery collections, then categor
 
 ## Media library
 
+The library opens in Unsorted. Choose a folder or All media from the folder picker to change what is shown. The image grid scrolls inside its own window; scrolling there keeps the rest of the page in place. The grid keeps its position when media refreshes and returns to the top when you choose a different folder.
+
 Place images or videos in the persistent application volume under `media/`, including nested directories. Supported files are indexed on media and folder API requests. Folder moves, renames, and deletion update the on-disk media paths.
 
 ## Limitations
