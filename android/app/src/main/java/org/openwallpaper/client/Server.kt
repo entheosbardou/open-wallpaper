@@ -12,9 +12,20 @@ import java.net.SocketTimeoutException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
 import java.io.IOException
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 object Server {
  data class SyncProgress(val completed:Int,val total:Int,val currentBytes:Long=0,val currentTotal:Long=-1)
+ class SyncCancellation {
+  private val stopped=AtomicBoolean(false)
+  private val connection=AtomicReference<HttpURLConnection?>(null)
+  fun cancel(){stopped.set(true);connection.getAndSet(null)?.disconnect()}
+  fun check(){if(stopped.get())throw CancellationException("Sync cancelled")}
+  fun use(conn:HttpURLConnection){check();connection.set(conn);if(stopped.get()){connection.compareAndSet(conn,null);conn.disconnect();check()}}
+  fun clear(conn:HttpURLConnection){connection.compareAndSet(conn,null)}
+ }
  private fun prefs(c:Context)=c.getSharedPreferences("settings",Context.MODE_PRIVATE)
  fun url(c:Context)=prefs(c).getString("url","")!!.trimEnd('/')
  fun token(c:Context)=prefs(c).getString("token","")!!
@@ -38,7 +49,8 @@ object Server {
   }
   return if(detail.isNotEmpty())"$category: $detail" else "$category (${cause.javaClass.name})"
  }
- fun request(c:Context,path:String,body:JSONObject?=null):JSONObject {
+ fun request(c:Context,path:String,body:JSONObject?=null,cancellation:SyncCancellation?=null):JSONObject {
+  cancellation?.check()
   val endpoint=url(c)+path
   val conn=(URL(endpoint).openConnection() as HttpURLConnection)
   conn.connectTimeout=12000;conn.readTimeout=20000
@@ -46,6 +58,7 @@ object Server {
   conn.instanceFollowRedirects=false
   conn.setRequestProperty("Accept","application/json")
   if(token(c).isNotEmpty())conn.setRequestProperty("Authorization","Bearer "+token(c))
+  cancellation?.use(conn)
   try {
    if(body!=null){
     conn.requestMethod="POST";conn.doOutput=true
@@ -59,11 +72,12 @@ object Server {
    }
    val text=(if(status in 200..299)conn.inputStream else conn.errorStream)?.bufferedReader()?.use{it.readText()}?:""
    if(status !in 200..299)throw IOException("HTTP $status from $endpoint: ${text.take(600)}")
+   cancellation?.check()
    try{return JSONObject(text)}catch(e:Exception){throw IOException("Invalid JSON from $endpoint (HTTP $status): ${text.take(250)}",e)}
-  } finally {conn.disconnect()}
+  } finally {cancellation?.clear(conn);conn.disconnect()}
  }
- fun sync(c:Context,onProgress:((SyncProgress)->Unit)?=null):JSONObject {
-  val result=request(c,"/api/device/config");val scene=result.optJSONObject("scene")
+ fun sync(c:Context,onProgress:((SyncProgress)->Unit)?=null,cancellation:SyncCancellation?=null):JSONObject {
+  val result=request(c,"/api/device/config",cancellation=cancellation);cancellation?.check();val scene=result.optJSONObject("scene")
   val ids=mutableSetOf<String>()
   if(scene!=null){
    val layers=scene.optJSONArray("layers")
@@ -84,9 +98,10 @@ object Server {
   onProgress?.invoke(SyncProgress(0,downloadable.size))
   var galleryDownloadFailed=false
   for(id in downloadable){
-   if(id.matches(Regex("[a-fA-F0-9]{32}")))download(c,id){bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))}
+   cancellation?.check()
+   if(id.matches(Regex("[a-fA-F0-9]{32}")))download(c,id,{bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))},cancellation)
    else if(id.matches(Regex("gallery:[1-9][0-9]{0,18}"))&&!result.optBoolean("gallery_outage")){
-    try{download(c,id){bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))}}catch(_:Exception){galleryDownloadFailed=true}
+    try{download(c,id,{bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))},cancellation)}catch(e:Exception){cancellation?.check();galleryDownloadFailed=true}
    }
    completed++
    onProgress?.invoke(SyncProgress(completed,downloadable.size))
@@ -159,18 +174,21 @@ object Server {
     }
    }
   }
+  cancellation?.check()
   File(c.filesDir,"scene.json").writeText(result.toString())
   return result
  }
- fun download(c:Context,id:String,onProgress:((Long,Long)->Unit)?=null):File {
+ fun download(c:Context,id:String,onProgress:((Long,Long)->Unit)?=null,cancellation:SyncCancellation?=null):File {
+  cancellation?.check()
   val external=id.matches(Regex("gallery:[1-9][0-9]{0,18}"))
   require(external||id.matches(Regex("[a-fA-F0-9]{32}")))
   val dest=cacheFile(c,id);val dir=dest.parentFile!!
-  if(dest.exists() && dest.length()>0){onProgress?.invoke(dest.length(),dest.length());return dest}
+  if(dest.exists() && dest.length()>0){cancellation?.check();onProgress?.invoke(dest.length(),dest.length());return dest}
   val temp=File(dir,dest.name+".part")
   val pathId=URLEncoder.encode(id,"UTF-8").replace("+","%20")
   val conn=(URL(url(c)+"/api/device/media/"+pathId).openConnection() as HttpURLConnection)
   conn.connectTimeout=12000;conn.readTimeout=60000;conn.setRequestProperty("Authorization","Bearer "+token(c))
-  try {if(conn.responseCode!=200)throw IllegalStateException("Media HTTP ${conn.responseCode}");val total=conn.contentLengthLong;var bytes=0L;conn.inputStream.use{input->temp.outputStream().use{output->val buffer=ByteArray(64*1024);while(true){val count=input.read(buffer);if(count<0)break;output.write(buffer,0,count);bytes+=count;onProgress?.invoke(bytes,total)}}};if(!temp.renameTo(dest))throw IllegalStateException("Cannot save media");return dest}finally{conn.disconnect();temp.delete()}
+  cancellation?.use(conn)
+  try {if(conn.responseCode!=200)throw IllegalStateException("Media HTTP ${conn.responseCode}");val total=conn.contentLengthLong;var bytes=0L;conn.inputStream.use{input->temp.outputStream().use{output->val buffer=ByteArray(64*1024);while(true){cancellation?.check();val count=input.read(buffer);if(count<0)break;output.write(buffer,0,count);bytes+=count;onProgress?.invoke(bytes,total)}}};cancellation?.check();if(!temp.renameTo(dest))throw IllegalStateException("Cannot save media");return dest}finally{cancellation?.clear(conn);conn.disconnect();temp.delete()}
  }
 }

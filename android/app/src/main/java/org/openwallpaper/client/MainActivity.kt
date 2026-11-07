@@ -17,6 +17,7 @@ import com.journeyapps.barcodescanner.CaptureActivity
 import android.Manifest
 import android.content.pm.PackageManager
 import kotlin.concurrent.thread
+import java.util.concurrent.CancellationException
 
 class MainActivity:Activity(){
  private val main=Handler(Looper.getMainLooper())
@@ -26,6 +27,9 @@ class MainActivity:Activity(){
  private lateinit var syncDetail:TextView
  private lateinit var previewImage:ImageView
  private lateinit var previewVideo:VideoView
+ private lateinit var syncButton:Button
+ private lateinit var stopSyncButton:Button
+ private var activeSync:Server.SyncCancellation?=null
  private var pairingCode=""
  private var waiting=false
  private val CAMERA_REQUEST=4242
@@ -54,14 +58,19 @@ class MainActivity:Activity(){
   layout.addView(button("2. Check pairing approval") {if(pairingCode.isNotEmpty())poll() else status.text="Request a pairing code first."})
   syncProgress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;visibility=android.view.View.GONE}
   syncDetail=label("",14f)
-  layout.addView(button("3. Sync assigned scene") {
+  syncButton=button("3. Sync assigned scene") {
+   val cancellation=Server.SyncCancellation();activeSync=cancellation
+   syncButton.isEnabled=false;stopSyncButton.isEnabled=true
    syncProgress.progress=0;syncProgress.visibility=android.view.View.VISIBLE;syncDetail.text="Checking assigned media…"
-   runAsync{val result=Server.sync(this){p->main.post{
+   thread{try{val result=Server.sync(this,{p->main.post{if(activeSync!==cancellation)return@post
     val fraction=if(p.total==0)1.0 else (p.completed+(if(p.currentTotal>0)p.currentBytes.toDouble()/p.currentTotal else 0.0))/p.total
     syncProgress.progress=(fraction*100).toInt().coerceIn(0,100)
     syncDetail.text=if(p.total==0)"No media to download" else "Media ${p.completed} of ${p.total} cached${if(p.currentTotal>0&&p.completed<p.total) " · ${p.currentBytes/1024} / ${p.currentTotal/1024} KB" else ""}"
-   }};main.post{syncProgress.progress=100;showPreview(result);status.text=when{result.optBoolean("gallery_notice")->"Wallpaper synced. Some Gallery media is unavailable; the rest continues playing.";result.optBoolean("gallery_outage")->"Gallery is unavailable. Cached media continues playing; new Gallery downloads are paused.";result.isNull("scene")&&result.isNull("playlist")->"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard.";else->"Wallpaper synced and cached."}}}
-  })
+   }},cancellation);main.post{if(activeSync===cancellation){syncProgress.progress=100;showPreview(result);status.text=when{result.optBoolean("gallery_notice")->"Wallpaper synced. Some Gallery media is unavailable; the rest continues playing.";result.optBoolean("gallery_outage")->"Gallery is unavailable. Cached media continues playing; new Gallery downloads are paused.";result.isNull("scene")&&result.isNull("playlist")->"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard.";else->"Wallpaper synced and cached."}}}}catch(e:Exception){val failure=try{cancellation.check();e}catch(cancelled:CancellationException){cancelled};main.post{if(activeSync===cancellation){if(failure is CancellationException){status.text="Sync stopped. Previously cached wallpaper is still available.";syncDetail.text="Sync stopped"}else{status.text="Error: ${Server.describeError(failure)}";syncDetail.text="Sync failed"}}}}finally{main.post{if(activeSync===cancellation){activeSync=null;syncButton.isEnabled=true;stopSyncButton.isEnabled=false}}}}
+  }
+  layout.addView(syncButton)
+  stopSyncButton=button("Stop sync") {activeSync?.cancel();stopSyncButton.isEnabled=false;syncDetail.text="Stopping sync…"}.apply{isEnabled=false}
+  layout.addView(stopSyncButton)
   layout.addView(syncProgress);layout.addView(syncDetail)
   layout.addView(label("Media preview",20f))
   previewImage=ImageView(this).apply{layoutParams=LinearLayout.LayoutParams(-1,480);scaleType=ImageView.ScaleType.CENTER_CROP;setBackgroundColor(Color.BLACK)}

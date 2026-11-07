@@ -11,7 +11,7 @@
 
 ## 2026-11-06 — Android media preview and manual sync progress
 
-- The Android activity now previews the first assigned cached image or looping video and reports file count and byte progress during manual sync. This is a media preview, not a composite rendering of scene layers. Source only; an Android build and device check have not been run.
+- The Android activity now previews the first assigned cached image or looping video and reports file count and byte progress during manual sync. A Stop sync button cancels the active connection and discards its partial download while retaining the last completed configuration. This is a media preview, not a composite rendering of scene layers. Source only; an Android build and device check have not been run.
 
 ## 2026-11-05 19:06 MST — Gallery playlist tablet sync confirmed
 
