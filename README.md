@@ -82,6 +82,7 @@ Place images or videos in the persistent application volume under `media/`, incl
 ## Limitations
 
 - Android video uses a dedicated playback surface and cannot composite clock/image layers over video yet.
+- The Android app shows the first assigned image or video from its local cache as a media preview. Its manual sync screen shows completed media count and download progress when the server supplies a content length; it does not render the full layered wallpaper preview.
 - Playlist changes are polled about once a minute while the wallpaper is visible.
 - Browser preview of playlist layers displays the first item and does not automatically rotate.
 - No native Windows/Linux client or arbitrary HTML/JS scene renderer is available yet.

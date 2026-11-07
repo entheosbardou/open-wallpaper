@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.view.Gravity
 import android.widget.*
 import org.json.JSONObject
@@ -21,6 +22,10 @@ class MainActivity:Activity(){
  private val main=Handler(Looper.getMainLooper())
  private lateinit var status:TextView
  private lateinit var code:TextView
+ private lateinit var syncProgress:ProgressBar
+ private lateinit var syncDetail:TextView
+ private lateinit var previewImage:ImageView
+ private lateinit var previewVideo:VideoView
  private var pairingCode=""
  private var waiting=false
  private val CAMERA_REQUEST=4242
@@ -28,7 +33,7 @@ class MainActivity:Activity(){
   val cached=Server.cachedConfig(this)?:return null
   return when{cached.optBoolean("gallery_notice")->"Some Gallery media is unavailable; playback continues.";cached.optBoolean("gallery_outage")->"Gallery is unavailable; cached media continues and new Gallery downloads are paused.";else->null}
  }
- override fun onResume(){super.onResume();cachedGalleryMessage()?.let{if(::status.isInitialized)status.text=it}}
+ override fun onResume(){super.onResume();cachedGalleryMessage()?.let{if(::status.isInitialized)status.text=it};if(::previewImage.isInitialized)showPreview(Server.cachedConfig(this))}
  override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState)
   val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,36,32,24);setBackgroundColor(Color.rgb(14,22,37))}
   fun label(t:String,size:Float=16f)=TextView(this).apply{text=t;textSize=size;setTextColor(Color.WHITE);setPadding(0,8,0,8)}
@@ -47,13 +52,49 @@ class MainActivity:Activity(){
   })
   layout.addView(code);layout.addView(status)
   layout.addView(button("2. Check pairing approval") {if(pairingCode.isNotEmpty())poll() else status.text="Request a pairing code first."})
-  layout.addView(button("3. Sync assigned scene") {runAsync{val result=Server.sync(this);main.post{status.text=when{result.optBoolean("gallery_notice")->"Wallpaper synced. Some Gallery media is unavailable; the rest continues playing.";result.optBoolean("gallery_outage")->"Gallery is unavailable. Cached media continues playing; new Gallery downloads are paused.";result.isNull("scene")&&result.isNull("playlist")->"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard.";else->"Wallpaper synced and cached."}}}})
+  syncProgress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;visibility=android.view.View.GONE}
+  syncDetail=label("",14f)
+  layout.addView(button("3. Sync assigned scene") {
+   syncProgress.progress=0;syncProgress.visibility=android.view.View.VISIBLE;syncDetail.text="Checking assigned media…"
+   runAsync{val result=Server.sync(this){p->main.post{
+    val fraction=if(p.total==0)1.0 else (p.completed+(if(p.currentTotal>0)p.currentBytes.toDouble()/p.currentTotal else 0.0))/p.total
+    syncProgress.progress=(fraction*100).toInt().coerceIn(0,100)
+    syncDetail.text=if(p.total==0)"No media to download" else "Media ${p.completed} of ${p.total} cached${if(p.currentTotal>0&&p.completed<p.total) " · ${p.currentBytes/1024} / ${p.currentTotal/1024} KB" else ""}"
+   }};main.post{syncProgress.progress=100;showPreview(result);status.text=when{result.optBoolean("gallery_notice")->"Wallpaper synced. Some Gallery media is unavailable; the rest continues playing.";result.optBoolean("gallery_outage")->"Gallery is unavailable. Cached media continues playing; new Gallery downloads are paused.";result.isNull("scene")&&result.isNull("playlist")->"Paired, but no wallpaper assigned. Assign a scene or playlist in the dashboard.";else->"Wallpaper synced and cached."}}}
+  })
+  layout.addView(syncProgress);layout.addView(syncDetail)
+  layout.addView(label("Media preview",20f))
+  previewImage=ImageView(this).apply{layoutParams=LinearLayout.LayoutParams(-1,480);scaleType=ImageView.ScaleType.CENTER_CROP;setBackgroundColor(Color.BLACK)}
+  previewVideo=VideoView(this).apply{layoutParams=LinearLayout.LayoutParams(-1,480);visibility=android.view.View.GONE}
+  layout.addView(previewImage);layout.addView(previewVideo)
   layout.addView(button("4. Set live wallpaper") {startActivity(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,android.content.ComponentName(this,Wallpaper::class.java)))})
   layout.addView(label("Tip: use the server's LAN IP, not localhost. HTTP is intended for trusted LANs only; use HTTPS for remote access.",13f))
   setContentView(ScrollView(this).apply{addView(layout)})
+  showPreview(Server.cachedConfig(this))
   handlePairingLink(intent)
  }
- private fun runAsync(job:()->Unit){thread{try{job()}catch(e:Exception){main.post{status.text="Error: ${Server.describeError(e)}"}}}}
+ private fun runAsync(job:()->Unit){thread{try{job()}catch(e:Exception){main.post{status.text="Error: ${Server.describeError(e)}";if(::syncDetail.isInitialized)syncDetail.text="Sync stopped"}}}}
+ private fun showPreview(config:JSONObject?){
+  previewVideo.stopPlayback();previewVideo.visibility=android.view.View.GONE;previewImage.visibility=android.view.View.VISIBLE;previewImage.setImageDrawable(null)
+  val ids=config?.optJSONObject("playlist")?.optJSONArray("media_ids")
+  var id=if(ids!=null&&ids.length()>0)ids.optString(0) else ""
+  var type=config?.optJSONObject("media_types")?.optString(id,"image")?:"image"
+  if(id.isEmpty()){
+   val layers=config?.optJSONObject("scene")?.optJSONArray("layers")
+   if(layers!=null)for(i in 0 until layers.length()){
+    val layer=layers.optJSONObject(i)?:continue
+    val mediaId=if(layer.optString("type")=="playlist")config?.optJSONObject("playlists")?.optJSONObject(layer.optString("playlist_id"))?.optJSONArray("media_ids")?.optString(0) else layer.optString("media_id")
+    if(!mediaId.isNullOrEmpty()){id=mediaId;type=if(layer.optString("type")=="playlist")config?.optJSONObject("media_types")?.optString(id,"image")?:"image" else layer.optString("type");break}
+   }
+  }
+  if(id.isEmpty())return
+  val file=Server.cacheFile(this,id);if(!file.exists())return
+  if(type=="video"){
+   previewImage.visibility=android.view.View.GONE;previewVideo.visibility=android.view.View.VISIBLE
+   previewVideo.setVideoPath(file.absolutePath);previewVideo.setOnPreparedListener{it.isLooping=true;previewVideo.start()}
+  }else previewImage.setImageBitmap(BitmapFactory.decodeFile(file.absolutePath))
+ }
+ override fun onPause(){if(::previewVideo.isInitialized)previewVideo.pause();super.onPause()}
  private fun openScanner(){
   if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
    requestPermissions(arrayOf(Manifest.permission.CAMERA),CAMERA_REQUEST)

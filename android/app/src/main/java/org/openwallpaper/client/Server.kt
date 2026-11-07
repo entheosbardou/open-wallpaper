@@ -14,6 +14,7 @@ import javax.net.ssl.SSLPeerUnverifiedException
 import java.io.IOException
 
 object Server {
+ data class SyncProgress(val completed:Int,val total:Int,val currentBytes:Long=0,val currentTotal:Long=-1)
  private fun prefs(c:Context)=c.getSharedPreferences("settings",Context.MODE_PRIVATE)
  fun url(c:Context)=prefs(c).getString("url","")!!.trimEnd('/')
  fun token(c:Context)=prefs(c).getString("token","")!!
@@ -61,7 +62,7 @@ object Server {
    try{return JSONObject(text)}catch(e:Exception){throw IOException("Invalid JSON from $endpoint (HTTP $status): ${text.take(250)}",e)}
   } finally {conn.disconnect()}
  }
- fun sync(c:Context):JSONObject {
+ fun sync(c:Context,onProgress:((SyncProgress)->Unit)?=null):JSONObject {
   val result=request(c,"/api/device/config");val scene=result.optJSONObject("scene")
   val ids=mutableSetOf<String>()
   if(scene!=null){
@@ -78,12 +79,17 @@ object Server {
   collect(result.optJSONObject("playlist"))
   val linked=result.optJSONObject("playlists")
   if(linked!=null){val keys=linked.keys();while(keys.hasNext())collect(linked.optJSONObject(keys.next()))}
+  val downloadable=ids.filter{it.matches(Regex("[a-fA-F0-9]{32}")) || (it.matches(Regex("gallery:[1-9][0-9]{0,18}"))&&!result.optBoolean("gallery_outage"))}
+  var completed=0
+  onProgress?.invoke(SyncProgress(0,downloadable.size))
   var galleryDownloadFailed=false
-  for(id in ids){
-   if(id.matches(Regex("[a-fA-F0-9]{32}")))download(c,id)
+  for(id in downloadable){
+   if(id.matches(Regex("[a-fA-F0-9]{32}")))download(c,id){bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))}
    else if(id.matches(Regex("gallery:[1-9][0-9]{0,18}"))&&!result.optBoolean("gallery_outage")){
-    try{download(c,id)}catch(_:Exception){galleryDownloadFailed=true}
+    try{download(c,id){bytes,total->onProgress?.invoke(SyncProgress(completed,downloadable.size,bytes,total))}}catch(_:Exception){galleryDownloadFailed=true}
    }
+   completed++
+   onProgress?.invoke(SyncProgress(completed,downloadable.size))
   }
   if(galleryDownloadFailed){
    result.put("gallery_notice",true)
@@ -156,15 +162,15 @@ object Server {
   File(c.filesDir,"scene.json").writeText(result.toString())
   return result
  }
- fun download(c:Context,id:String):File {
+ fun download(c:Context,id:String,onProgress:((Long,Long)->Unit)?=null):File {
   val external=id.matches(Regex("gallery:[1-9][0-9]{0,18}"))
   require(external||id.matches(Regex("[a-fA-F0-9]{32}")))
   val dest=cacheFile(c,id);val dir=dest.parentFile!!
-  if(dest.exists() && dest.length()>0)return dest
+  if(dest.exists() && dest.length()>0){onProgress?.invoke(dest.length(),dest.length());return dest}
   val temp=File(dir,dest.name+".part")
   val pathId=URLEncoder.encode(id,"UTF-8").replace("+","%20")
   val conn=(URL(url(c)+"/api/device/media/"+pathId).openConnection() as HttpURLConnection)
   conn.connectTimeout=12000;conn.readTimeout=60000;conn.setRequestProperty("Authorization","Bearer "+token(c))
-  try {if(conn.responseCode!=200)throw IllegalStateException("Media HTTP ${conn.responseCode}");conn.inputStream.use{input->temp.outputStream().use{output->input.copyTo(output)}};if(!temp.renameTo(dest))throw IllegalStateException("Cannot save media");return dest}finally{conn.disconnect();temp.delete()}
+  try {if(conn.responseCode!=200)throw IllegalStateException("Media HTTP ${conn.responseCode}");val total=conn.contentLengthLong;var bytes=0L;conn.inputStream.use{input->temp.outputStream().use{output->val buffer=ByteArray(64*1024);while(true){val count=input.read(buffer);if(count<0)break;output.write(buffer,0,count);bytes+=count;onProgress?.invoke(bytes,total)}}};if(!temp.renameTo(dest))throw IllegalStateException("Cannot save media");return dest}finally{conn.disconnect();temp.delete()}
  }
 }
